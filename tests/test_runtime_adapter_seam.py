@@ -18,6 +18,7 @@ def test_runtime_adapter_interface_and_legacy_journal_methods_exist():
     for name in required:
         assert hasattr(runtime.RuntimeAdapter, name)
         assert hasattr(runtime.LegacyJournalRuntimeAdapter, name)
+        assert hasattr(runtime.RunnerRuntimeAdapter, name)
 
     assert runtime.runtime_adapter_mode({}) == "legacy-direct"
     assert runtime.runtime_adapter_enabled({}) is False
@@ -328,3 +329,120 @@ def test_rfc_defines_slice4_runner_contract_before_runner_code():
     assert "profile,\n   workspace, attachments, model/provider, toolset, and source metadata" in rfc
     assert "no removal of the legacy in-process backend" in rfc
     assert "no default-on runner mode" in rfc
+    assert "#### Slice 4b: Runner adapter client facade" in rfc
+    assert "delegates to an injected runner client" in rfc
+    assert "without relying on process-local `STREAMS`" in rfc
+
+
+def test_runner_runtime_adapter_passes_explicit_start_payload_without_env_mutation(monkeypatch):
+    runtime = importlib.import_module("api.runtime_adapter")
+    captured = []
+
+    class FakeRunnerClient:
+        def start_run(self, request):
+            captured.append(request)
+            return {
+                "run_id": "runner-1",
+                "session_id": request.session_id,
+                "stream_id": "runner-1",
+                "status": "running",
+                "active_controls": ["cancel", "approval", "clarify", "goal"],
+            }
+
+    before_terminal_cwd = "existing-cwd"
+    monkeypatch.setenv("TERMINAL_CWD", before_terminal_cwd)
+    adapter = runtime.RunnerRuntimeAdapter(client=FakeRunnerClient())
+    request = runtime.StartRunRequest(
+        session_id="s-runner",
+        message="hello runner",
+        attachments=[{"path": "/tmp/a.png", "mime": "image/png"}],
+        workspace="/workspace/project",
+        profile="research",
+        provider="openai-codex",
+        model="gpt-5.5",
+        toolsets=["terminal", "file"],
+        source="webui",
+        metadata={"route": "/api/chat/start", "csrf_checked": True},
+    )
+
+    result = adapter.start_run(request)
+
+    assert captured == [request]
+    assert captured[0].workspace == "/workspace/project"
+    assert captured[0].profile == "research"
+    assert captured[0].attachments == [{"path": "/tmp/a.png", "mime": "image/png"}]
+    assert captured[0].provider == "openai-codex"
+    assert captured[0].model == "gpt-5.5"
+    assert captured[0].toolsets == ["terminal", "file"]
+    assert result.run_id == "runner-1"
+    assert result.active_controls == ["cancel", "approval", "clarify", "goal"]
+    assert runtime.os.environ["TERMINAL_CWD"] == before_terminal_cwd
+
+
+def test_runner_runtime_adapter_observe_and_get_survive_adapter_recreation():
+    runtime = importlib.import_module("api.runtime_adapter")
+
+    class FakeRunnerClient:
+        def __init__(self):
+            self.events = []
+            self.status = "unknown"
+
+        def start_run(self, request):
+            self.status = "running"
+            self.events.append({"event_id": "runner-1:1", "seq": 1, "type": "token", "data": {"text": "hi"}})
+            self.events.append({"event_id": "runner-1:2", "seq": 2, "type": "done", "data": {"ok": True}})
+            self.status = "completed"
+            return {"run_id": "runner-1", "session_id": request.session_id, "stream_id": "runner-1", "status": "running"}
+
+        def observe_run(self, run_id, *, cursor=None):
+            after = int(cursor or 0)
+            return {"run_id": run_id, "events": [e for e in self.events if e["seq"] > after]}
+
+        def get_run(self, run_id):
+            return {
+                "run_id": run_id,
+                "session_id": "s-runner",
+                "status": self.status,
+                "terminal_state": "completed",
+                "last_event_id": self.events[-1]["event_id"],
+                "active_controls": [],
+            }
+
+    shared_runner = FakeRunnerClient()
+    first_webui_process = runtime.RunnerRuntimeAdapter(client=shared_runner)
+    first_webui_process.start_run(runtime.StartRunRequest(session_id="s-runner", message="hello"))
+
+    restarted_webui_process = runtime.RunnerRuntimeAdapter(client=shared_runner)
+    replay = restarted_webui_process.observe_run("runner-1", cursor="1")
+    status = restarted_webui_process.get_run("runner-1")
+
+    assert [event["type"] for event in replay.events] == ["done"]
+    assert replay.cursor == "2"
+    assert replay.last_event_id == "runner-1:2"
+    assert status.status == "completed"
+    assert status.terminal_state == "completed"
+    assert status.last_event_id == "runner-1:2"
+
+
+def test_runner_runtime_adapter_controls_are_bounded_and_do_not_use_legacy_state():
+    runtime = importlib.import_module("api.runtime_adapter")
+
+    class FakeRunnerClient:
+        def cancel_run(self, run_id):
+            return {"ok": False, "status": "not-active", "message": "Run is not active."}
+
+    adapter = runtime.RunnerRuntimeAdapter(client=FakeRunnerClient())
+
+    cancel = adapter.cancel_run("finished-run")
+    approval = adapter.respond_approval("finished-run", "approval-1", "once")
+    clarify = adapter.respond_clarify("finished-run", "clarify-1", "answer")
+    queued = adapter.queue_message("finished-run", "next")
+    goal = adapter.update_goal("s-runner", "status")
+
+    assert cancel.accepted is False
+    assert cancel.status == "not-active"
+    assert cancel.safe_message == "Run is not active."
+    for result in (approval, clarify, queued, goal):
+        assert result.accepted is False
+        assert result.status == "unsupported"
+        assert "not supported by this runner backend" in (result.safe_message or "")
