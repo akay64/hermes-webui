@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Documentation
+
+- **PR #TBD** by @Michaelyklam (refs #1925) — Clarify the RuntimeAdapter Slice 3c state after #2544 shipped. The RFC now distinguishes shipped `/api/goal` routing through `RuntimeAdapter.update_goal(...)` from the still-staged `queue_message(...)` protocol method, and explicitly warns not to add a new server-side queue endpoint or queue scheduler merely for adapter symmetry while `/queue` remains browser-side queue/drain behavior.
+
 ## [v0.51.91] — 2026-05-18 — Release BO (stage-384 — 5-PR full sweep batch — reasoning-replay history fix + archive-extract per-session inbox + fallback streaming warnings + sanitized custom-provider env hints + Slice 3c queue/goal adapter routing)
 
 ### Fixed
