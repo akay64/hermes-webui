@@ -8,6 +8,7 @@
 - When the session index is missing, WebUI now starts a background rebuild while preserving the first sidebar full-scan result, so the index is primed for later requests without temporarily hiding existing sessions.
 - Live token-usage hints now cap the cumulative in-flight tool-result prompt estimate per assistant turn, preventing many large tool callbacks from temporarily inflating the context ring before exact provider accounting arrives.
 - Streaming checkpoint saves now run under the session's profile environment, so periodic background checkpoints no longer risk falling back to the process-global profile when a WebUI tab is using a non-default profile.
+- Chat streaming now keeps a single live EventSource registered per session/stream, preventing reconnect or context-compaction paths from stacking subscribers and rendering one assistant token stream multiple times.
 
 ## [v0.51.135] — 2026-05-25 — Release DG (stage-batch17 — 9-PR small-fix batch)
 
