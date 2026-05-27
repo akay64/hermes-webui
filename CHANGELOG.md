@@ -3,6 +3,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- WebUI can now opt into a `webui_prefill_messages_script` / `HERMES_WEBUI_PREFILL_MESSAGES_SCRIPT` hook for dynamic browser-turn prefill context from local notes or recall systems. The script output is capped at 256 KiB, normalized to ephemeral prefill messages, and browser status still hides message bodies while redacting script errors.
+
 ## [v0.51.140] — 2026-05-26 — Release DL (stage-batch22 — 5-PR hold-bucket reassessment)
 
 ### Fixed
