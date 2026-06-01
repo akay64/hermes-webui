@@ -285,7 +285,8 @@ function collectSessionArtifacts(){
     // Structured tool_calls array (OpenAI format: {function:{name,arguments}}).
     if(Array.isArray(msg.tool_calls)){
       for(const tc of msg.tool_calls){
-        const fn = tc.function || tc;
+        if(!tc || typeof tc !== 'object') continue;
+        const fn = (tc.function && typeof tc.function === 'object') ? tc.function : tc;
         const name = fn.name || tc.name || '';
         let args = fn.arguments || tc.arguments || tc.args || tc.input || {};
         if(typeof args === 'string'){ try{ args = JSON.parse(args); }catch(_){} }
