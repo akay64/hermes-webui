@@ -145,13 +145,11 @@ def _gateway_stream_usage(payload: dict) -> dict:
 def _gateway_reasoning_delta(payload: dict) -> str:
     if not isinstance(payload, dict):
         return ""
-    return str(
-        payload.get("text")
-        or payload.get("preview")
-        or payload.get("delta")
-        or payload.get("content")
-        or ""
-    ).strip()
+    for key in ("text", "preview", "delta", "content"):
+        value = payload.get(key)
+        if isinstance(value, str) and value.strip():
+            return value
+    return ""
 
 
 def _gateway_tool_progress_event(payload: dict) -> tuple[str, dict] | None:
@@ -375,7 +373,7 @@ def _run_gateway_chat_streaming(
                         if event_name == "reasoning":
                             reason_delta = event_payload.get("text")
                             if reason_delta and stream_id in STREAM_REASONING_TEXT:
-                                STREAM_REASONING_TEXT[stream_id] += str(reason_delta)
+                                STREAM_REASONING_TEXT[stream_id] += reason_delta
                         elif stream_id in STREAM_LIVE_TOOL_CALLS:
                             if event_name == "tool":
                                 STREAM_LIVE_TOOL_CALLS[stream_id].append({
@@ -439,6 +437,9 @@ def _run_gateway_chat_streaming(
             if attachments:
                 user_msg["attachments"] = list(attachments)
             assistant_msg = {"role": "assistant", "content": assistant_text, "timestamp": assistant_ts}
+            saved_reasoning = STREAM_REASONING_TEXT.get(stream_id, "")
+            if saved_reasoning:
+                assistant_msg["reasoning"] = saved_reasoning
             previous_context = list(getattr(s, "context_messages", None) or getattr(s, "messages", None) or [])
             s.context_messages = previous_context + [user_msg, assistant_msg]
             try:
