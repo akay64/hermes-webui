@@ -427,3 +427,149 @@ console.log(JSON.stringify({recovered, deletes, renderCalls}));
     assert metrics["recovered"] is True
     assert metrics["deletes"] == ["sid-123"]
     assert metrics["renderCalls"] == [{"preserveScroll": True, "_virtualFallback": True}]
+
+
+def test_same_frame_restore_nudges_virtual_window_when_anchor_row_is_missing():
+    js = UI_JS_PATH.read_text(encoding="utf-8")
+    source = _extract_func_script(js) + r"""
+const ROW_HEIGHT = 120;
+const TOTAL = 60;
+
+// Rows 10-59 are mounted (tail window); rows 0-9 are virtualized out.
+// Anchor points to rawIdx=5, which is in the virtualized zone.
+let mountedStart = 10;
+let scrollTopValue = 0;
+let renderCalls = [];
+let scrollTopHistory = [];
+let _messageVirtualWindowKey = 'stale-key';
+let _programmaticScroll = false;
+let _lastScrollTop = 0;
+let _messageUserUnpinned = true;
+let _scrollPinned = false;
+let _nearBottomCount = 0;
+let _messageVirtualHeightCache = Array.from({length: TOTAL}, () => ROW_HEIGHT);
+let _messageVirtualHeightCacheEntries = [];
+let _messageVirtualHeightCacheLen = TOTAL;
+let _messageVirtualHeightCacheSrc = null;
+let _messageVirtualEstimatedRowHeight = ROW_HEIGHT;
+
+function _clearMessageVirtualHeightCache(){}
+function _syncMessageVirtualHeightCache(){}
+
+const container = {
+  get scrollTop(){ return scrollTopValue; },
+  set scrollTop(v){ scrollTopHistory.push(v); scrollTopValue = v; },
+  get scrollHeight(){ return TOTAL * ROW_HEIGHT; },
+  get clientHeight(){ return 600; },
+  getBoundingClientRect(){ return {top: 0, bottom: 600}; },
+  querySelector(selector){
+    const m = selector && selector.match(/\[data-msg-idx="(\d+)"\]/);
+    if(!m) return null;
+    const idx = Number(m[1]);
+    if(idx < mountedStart || idx >= TOTAL) return null;
+    const top = (idx - mountedStart) * ROW_HEIGHT;
+    return { getBoundingClientRect(){ return {top, bottom: top + ROW_HEIGHT}; } };
+  },
+};
+function $(id){ return id === 'messages' ? container : null; }
+
+function _getVisibleMessagesWithIdx(){
+  return Array.from({length: TOTAL}, (_, i) => ({rawIdx: i}));
+}
+
+function renderMessages(opts){
+  renderCalls.push(JSON.parse(JSON.stringify(opts)));
+  mountedStart = 0;
+}
+
+function _restoreMessageViewportAnchor(anchor, delta){
+  const idx = Number(anchor.rawIdx) + Number(delta||0);
+  const row = container.querySelector(`[data-msg-idx="${idx}"]`);
+  if(!row) return false;
+  _programmaticScroll = true;
+  return true;
+}
+
+eval(extractFunc('_messageVisibleIndexForRawIdx'));
+eval(extractFunc('_messageVirtualScrollTopForVisibleIdx'));
+eval(extractFunc('_restoreMessageScrollSnapshotSameFrame'));
+
+const snapshot = {
+  anchor: {rawIdx: 5, topOffset: 50},
+  top: 100,
+  bottom: 6600,
+  scrollHeight: 7200,
+  pinned: false,
+  userUnpinned: true,
+};
+_restoreMessageScrollSnapshotSameFrame(snapshot);
+console.log(JSON.stringify({renderCalls, scrollTopHistory}));
+"""
+    metrics = json.loads(_run_node(source))
+    assert len(metrics["renderCalls"]) == 1, (
+        "_restoreMessageScrollSnapshotSameFrame must call renderMessages to mount the virtualized-out anchor row"
+    )
+    assert metrics["renderCalls"][0].get("preserveScroll") is True, (
+        "re-render must use preserveScroll:true to avoid scrolling to bottom"
+    )
+    assert len(metrics["scrollTopHistory"]) >= 1, (
+        "scrollTop must be adjusted before re-render to place anchor row in the virtual window"
+    )
+    # rawIdx=5, visIdx=5: offset=5*120=600, viewport=600, scrollTop=round(600-600*0.35)=390
+    assert metrics["scrollTopHistory"][0] == 390
+
+
+def test_virtualize_transcript_opt_out_forces_full_render_window():
+    """#4325: when window._virtualizeTranscript===false, _currentMessageVirtualWindow
+    must return a non-virtualized full window even for a long (>threshold) transcript,
+    so the whole transcript renders. When true/undefined it virtualizes as before."""
+    js = UI_JS_PATH.read_text(encoding="utf-8")
+    source = _extract_func_script(js) + """
+const MESSAGE_VIRTUAL_THRESHOLD_ROWS = 80;
+const MESSAGE_VIRTUAL_DEFAULT_ROW_HEIGHT = 140;
+const MESSAGE_VIRTUAL_BUFFER_PX = 900;
+let _messageVirtualHeightCache = [];
+let _messageVirtualEstimatedRowHeight = 140;
+function _syncMessageVirtualHeightCache(){ /* no-op for the test */ }
+function $(id){ return {scrollTop: 5000, clientHeight: 720}; }
+const window = {};
+eval(extractFunc('_messageVirtualWindow'));
+eval(extractFunc('_currentMessageVirtualWindow'));
+// 200 visible messages — well over the 80 threshold
+const visWithIdx = Array.from({length: 200}, (_, i) => ({rawIdx: i}));
+// OFF: opt-out → full render
+window._virtualizeTranscript = false;
+const off = _currentMessageVirtualWindow(visWithIdx, 50);
+// ON (default): virtualizes
+window._virtualizeTranscript = true;
+const on = _currentMessageVirtualWindow(visWithIdx, 50);
+// UNDEFINED: also virtualizes (opt-out only when explicitly false)
+delete window._virtualizeTranscript;
+const undef = _currentMessageVirtualWindow(visWithIdx, 50);
+console.log(JSON.stringify({off, on, undef}));
+"""
+    metrics = json.loads(_run_node(source))
+    # OFF → full, non-virtualized window covering every row
+    assert metrics["off"]["virtualized"] is False
+    assert metrics["off"]["start"] == 0
+    assert metrics["off"]["end"] == 200
+    assert metrics["off"]["topPad"] == 0
+    assert metrics["off"]["bottomPad"] == 0
+    # ON → virtualized (only a window of the 200 rows)
+    assert metrics["on"]["virtualized"] is True
+    assert metrics["on"]["end"] - metrics["on"]["start"] < 200
+    # UNDEFINED → still virtualizes (opt-out is explicit-false only)
+    assert metrics["undef"]["virtualized"] is True
+
+
+def test_virtualize_transcript_gate_present_in_current_window_fn():
+    """The opt-out gate must live in _currentMessageVirtualWindow (the single
+    chokepoint), guarding on window._virtualizeTranscript===false."""
+    js = UI_JS_PATH.read_text(encoding="utf-8")
+    start = js.index("function _currentMessageVirtualWindow(")
+    body = js[start:start + 900]
+    assert "_virtualizeTranscript===false" in body, (
+        "opt-out gate must check window._virtualizeTranscript===false in "
+        "_currentMessageVirtualWindow"
+    )
+    assert "virtualized:false" in body, "gate must return a non-virtualized window when opted out"

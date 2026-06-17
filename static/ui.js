@@ -612,6 +612,15 @@ function _syncMessageVirtualHeightCache(visWithIdx){
 function _currentMessageVirtualWindow(visWithIdx, keepTailCount){
   _syncMessageVirtualHeightCache(visWithIdx);
   const container=$('messages');
+  // #4325 opt-out: when the user disables transcript virtualization, always
+  // render the full transcript (no windowing). Mirrors the <=threshold path so
+  // every downstream consumer (render, anchor, prepend-delta) treats it as a
+  // plain non-virtualized list.
+  if(typeof window!=='undefined' && window._virtualizeTranscript===false){
+    const total=visWithIdx.length;
+    const tailStart=Math.max(0, total-Math.max(0, Number(keepTailCount)||0));
+    return {virtualized:false,start:0,end:total,topPad:0,bottomPad:0,total,tailStart};
+  }
   return _messageVirtualWindow({
     total:visWithIdx.length,
     scrollTop:container?container.scrollTop:0,
@@ -9667,13 +9676,35 @@ function _restoreMessageScrollSnapshot(snapshot){
 function _restoreMessageScrollSnapshotSameFrame(snapshot){
   const el=$('messages');
   if(!el||!snapshot) return;
-  const maxTop=Math.max(0,el.scrollHeight-el.clientHeight);
-  const bottom=Number(snapshot.bottom);
-  const target=(snapshot.pinned===true&&Number.isFinite(bottom))
-    ? maxTop-Math.max(0,bottom)
-    : Number(snapshot.top)||0;
-  _programmaticScroll=true;
-  el.scrollTop=Math.max(0,Math.min(target,maxTop));
+  let restoredViaAnchor=(snapshot.anchor&&typeof _restoreMessageViewportAnchor==='function')
+    ? _restoreMessageViewportAnchor(snapshot.anchor,0)
+    : false;
+  if(!restoredViaAnchor&&snapshot.anchor&&snapshot.anchor.rawIdx!=null&&
+     !el.querySelector(`[data-msg-idx="${snapshot.anchor.rawIdx}"]`)&&
+     typeof _getVisibleMessagesWithIdx==='function'&&
+     typeof _messageVisibleIndexForRawIdx==='function'&&
+     typeof _messageVirtualScrollTopForVisibleIdx==='function'){
+    const visWithIdx=_getVisibleMessagesWithIdx();
+    const visIdx=_messageVisibleIndexForRawIdx(snapshot.anchor.rawIdx,visWithIdx);
+    if(visIdx>=0){
+      _programmaticScroll=true;
+      el.scrollTop=_messageVirtualScrollTopForVisibleIdx(visWithIdx,visIdx,el);
+      _messageVirtualWindowKey='';
+      renderMessages({preserveScroll:true});
+      restoredViaAnchor=(typeof _restoreMessageViewportAnchor==='function')
+        ? _restoreMessageViewportAnchor(snapshot.anchor,0)
+        : false;
+    }
+  }
+  if(!restoredViaAnchor){
+    const maxTop=Math.max(0,el.scrollHeight-el.clientHeight);
+    const bottom=Number(snapshot.bottom);
+    const target=(snapshot.pinned===true&&Number.isFinite(bottom))
+      ? maxTop-Math.max(0,bottom)
+      : Number(snapshot.top)||0;
+    _programmaticScroll=true;
+    el.scrollTop=Math.max(0,Math.min(target,maxTop));
+  }
   _lastScrollTop=el.scrollTop;
   if(snapshot.pinned===true){
     _messageUserUnpinned=false;
@@ -9684,7 +9715,9 @@ function _restoreMessageScrollSnapshotSameFrame(snapshot){
     _scrollPinned=false;
     _nearBottomCount=0;
   }
-  requestAnimationFrame(()=>{ setTimeout(()=>{_programmaticScroll=false;},0); });
+  if(!restoredViaAnchor){
+    requestAnimationFrame(()=>{ setTimeout(()=>{_programmaticScroll=false;},0); });
+  }
 }
 function _renderMessagesWithScrollSnapshot(options){
   const scrollSnapshot=_captureMessageScrollSnapshot();

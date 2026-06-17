@@ -6409,6 +6409,8 @@ function _preferencesPayloadFromUi(){
   if(showConversationOutlineCb) payload.show_conversation_outline=showConversationOutlineCb.checked;
   const hideSuggestionsCb=$('settingsHideSuggestions');
   if(hideSuggestionsCb) payload.hide_empty_state_suggestions=hideSuggestionsCb.checked;
+  const virtualizeTranscriptCb=$('settingsVirtualizeTranscript');
+  if(virtualizeTranscriptCb) payload.virtualize_transcript=virtualizeTranscriptCb.checked;
   const showTpsCb=$('settingsShowTps');
   if(showTpsCb) payload.show_tps=showTpsCb.checked;
   const fadeTextCb=$('settingsFadeTextEffect');
@@ -6758,6 +6760,20 @@ async function loadSettingsPanel(){
       hideSuggestionsCb.addEventListener('change',()=>{
         window._hideEmptyStateSuggestions=hideSuggestionsCb.checked;
         if(typeof applyEmptyStateSuggestionPref==='function') applyEmptyStateSuggestionPref();
+        _schedulePreferencesAutosave();
+      },{once:false});
+    }
+    const virtualizeTranscriptCb=$('settingsVirtualizeTranscript');
+    if(virtualizeTranscriptCb){
+      // #4325: opt-out toggle, default ON. settings.virtualize_transcript may be
+      // undefined on older configs → treat as enabled (!==false).
+      virtualizeTranscriptCb.checked=settings.virtualize_transcript!==false;
+      window._virtualizeTranscript=virtualizeTranscriptCb.checked;
+      virtualizeTranscriptCb.addEventListener('change',()=>{
+        window._virtualizeTranscript=virtualizeTranscriptCb.checked;
+        // Re-render the open transcript so the change takes effect immediately
+        // (full render when off, windowed when on).
+        if(typeof renderMessages==='function'){ try{ renderMessages({preserveScroll:true}); }catch(e){ console.warn('[virtualize_transcript] renderMessages failed on toggle:',e); } }
         _schedulePreferencesAutosave();
       },{once:false});
     }

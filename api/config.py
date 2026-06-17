@@ -6875,6 +6875,7 @@ _SETTINGS_DEFAULTS = {
     "show_quota_chip": False,  # show ambient provider quota chip in composer footer (default off; wide desktop only when enabled, see style.css @media)
     "show_conversation_outline": False,  # show opt-in desktop jump-to-question outline panel
     "hide_empty_state_suggestions": False,  # hide the default new-chat suggestion buttons
+    "virtualize_transcript": True,  # #4325: virtualize long (>80 msg) transcripts; opt-OUT (default on) — off renders the full transcript
     "show_tps": False,  # show tokens-per-second chip in assistant message headers
     "fade_text_effect": False,  # animate newly streamed words with a lightweight fade-in effect
     "show_cli_sessions": True,  # merge CLI/TUI/messaging sessions from state.db into the sidebar by default (#3988); established installs are grandfathered OFF by the load_settings backfill
@@ -7082,6 +7083,7 @@ _SETTINGS_BOOL_KEYS = {
     "show_quota_chip",
     "show_conversation_outline",
     "hide_empty_state_suggestions",
+    "virtualize_transcript",
     "show_tps",
     "fade_text_effect",
     "show_cli_sessions",

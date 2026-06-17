@@ -1852,6 +1852,10 @@ function applyBotName(){
     if(typeof applyConversationOutlinePreference==='function') applyConversationOutlinePreference();
     window._hideEmptyStateSuggestions=s.hide_empty_state_suggestions===true;
     applyEmptyStateSuggestionPref();
+    // #4325: transcript virtualization is opt-OUT (default on). When the user
+    // disables it, long transcripts render in full (no windowing) — an escape
+    // hatch for any virtualization rendering edge case.
+    window._virtualizeTranscript=s.virtualize_transcript!==false;
     window._showTps=!!s.show_tps;
     window._fadeTextEffect=!!s.fade_text_effect;
     window._showCliSessions=s.show_cli_sessions!==false;
@@ -1963,6 +1967,7 @@ function applyBotName(){
     if(typeof applyConversationOutlinePreference==='function') applyConversationOutlinePreference();
     window._hideEmptyStateSuggestions=false;
     applyEmptyStateSuggestionPref();
+    window._virtualizeTranscript=true;  // settings-load failed: default-on (opt-out) (#4325)
     window._showTps=false;
     window._fadeTextEffect=false;
     window._showCliSessions=true;  // settings-load failed: mirror the True config default (#3988)
