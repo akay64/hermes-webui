@@ -350,7 +350,7 @@ def _truncate(text: str, limit: int) -> str:
     return s[:limit] + "\n…(truncated)"
 
 
-def format_wakeup_prompt(evt: dict) -> str | None:
+def format_wakeup_prompt(evt: object) -> str | None:
     """Build the synthetic [IMPORTANT: …] message the agent will see.
 
     Mirrors ``cli._format_process_notification`` so wakeup payloads look the
@@ -362,6 +362,10 @@ def format_wakeup_prompt(evt: dict) -> str | None:
     evt_type = evt.get("type", "completion")
     sid = str(evt.get("session_id") or "").strip()
     cmd = str(evt.get("command") or "").strip()
+    # The current server-side wakeup drain drops global watch-overflow events
+    # before this formatter because they intentionally carry no session_key.
+    # Keep this branch defensive so any future routable overflow summary is not
+    # mis-rendered as a fake process completion.
     if evt_type in {"watch_overflow_tripped", "watch_overflow_released"}:
         msg = str(evt.get("message") or "").strip()
         return f"[IMPORTANT: {msg}]" if msg else None
