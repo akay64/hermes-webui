@@ -3,6 +3,13 @@
 
 ## [Unreleased]
 
+## [v0.51.540] — 2026-06-20 — Release SY (cross-provider model selection sticks + gateway reasoning effort)
+
+### Fixed
+
+- **A cross-provider relay model no longer silently reverts to the profile default after the first message (#3737).** When you selected a cross-provider relay model (e.g. `custom:glm-free-relay`), the explicit-pick marker was consumed after the first send, so subsequent turns lost the explicit pick and the server "repaired" the model back to the profile default. The composer now treats a non-default model from a different provider than the profile's active provider as an explicit pick on every send, and `_catalog_has_provider()` correctly recognizes compound provider IDs (`custom:glm-free-relay` → `custom`). Thanks @jja881.
+- **The gateway chat path now forwards the reasoning-effort control (#4550).** The browser's reasoning-effort setting was silently ignored in remote/gateway mode while the local path already honored it. The gateway request now reads and coerces `agent.reasoning_effort` with the same logic as the local path and forwards it on both the runs-API and legacy chat-completions branches (explicit "none" preserved; absent/invalid values omitted). Thanks @rodboev.
+
 ## [v0.51.539] — 2026-06-20 — Release SX (gateway session continuity + local slash-model routing)
 
 ### Fixed
