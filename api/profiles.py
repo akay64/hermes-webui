@@ -966,7 +966,15 @@ def profile_env_for_active_request_readonly(
         yield
     finally:
         if home_override_token is not None and reset_hermes_home_override is not None:
-            reset_hermes_home_override(home_override_token)
+            try:
+                reset_hermes_home_override(home_override_token)
+            except Exception:
+                (logger_override or logger).debug(
+                    "Failed to reset Hermes-home override for active request profile %s in %s",
+                    profile,
+                    purpose,
+                    exc_info=True,
+                )
         _thread_ctx.block_process_env_fallback = previous_block_process_env
         if previous_thread_env:
             _set_thread_env(**previous_thread_env)

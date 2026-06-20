@@ -6415,7 +6415,7 @@ def get_available_models(*, prefer_cache: bool = False) -> dict:
         try:
             from api.profiles import (
                 get_active_profile_name as _gapn,
-                profile_env_for_active_request_readonly as _prof_env_request,
+                profile_env_for_active_request as _prof_env_request,
                 profile_scope_for_detached_worker as _prof_scope_worker,
             )
             _active_profile_name = (_gapn() or "").strip()
@@ -6427,7 +6427,9 @@ def get_available_models(*, prefer_cache: bool = False) -> dict:
         if _LIVE_REBUILD_BUDGET_SECONDS <= 0:
             try:
                 # Foreground thread already carries the request-profile TLS;
-                # apply the profile env (no-op for default) for the live probe.
+                # apply the mirrored profile env (no-op for default) for the
+                # live probe because provider_model_ids() still has raw
+                # os.getenv()/HERMES_HOME readers on this synchronous path.
                 _sync_scope = (
                     _prof_env_request("models rebuild (sync)")
                     if _prof_env_request is not None
@@ -6903,7 +6905,7 @@ def _thread_local_env_value(name: str, default: str = "") -> str:
     if isinstance(thread_env, dict) and env_name in thread_env:
         thread_value = thread_env.get(env_name)
         if thread_value is None:
-            return default
+            return default or ""
         return str(thread_value)
 
     if bool(getattr(_thread_ctx, "block_process_env_fallback", False)):

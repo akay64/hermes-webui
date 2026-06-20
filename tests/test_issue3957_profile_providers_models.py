@@ -247,6 +247,45 @@ def test_active_request_scope_sets_context_local_hermes_home(monkeypatch, tmp_pa
         profiles.clear_request_profile()
 
 
+def test_active_request_scope_restores_state_when_home_reset_fails(monkeypatch, tmp_path):
+    """Readonly scope still clears thread-local state if Hermes-home reset raises."""
+    base = tmp_path / ".hermes"
+    work_home = base / "profiles" / "work"
+    work_home.mkdir(parents=True)
+    (work_home / ".env").write_text(
+        "ISSUE_3957_PROBE=from-work-profile\n", encoding="utf-8"
+    )
+    monkeypatch.setattr(profiles, "_DEFAULT_HERMES_HOME", base)
+    monkeypatch.setenv("ISSUE_3957_PROBE", "from-process-env")
+    current_home = {"value": None}
+
+    fake_constants = types.SimpleNamespace()
+
+    def _set_override(path):
+        previous = current_home["value"]
+        current_home["value"] = Path(path)
+        return previous
+
+    def _reset_override(token):
+        current_home["value"] = token
+        raise RuntimeError("reset failed")
+
+    fake_constants.set_hermes_home_override = _set_override
+    fake_constants.reset_hermes_home_override = _reset_override
+    fake_constants.get_hermes_home = lambda: current_home["value"]
+    monkeypatch.setitem(sys.modules, "hermes_constants", fake_constants)
+
+    profiles.set_request_profile("work")
+    try:
+        with profiles.profile_env_for_active_request_readonly("test"):
+            assert config._thread_local_env_value("ISSUE_3957_PROBE") == "from-work-profile"
+            assert fake_constants.get_hermes_home() == work_home
+        assert config._thread_local_env_value("ISSUE_3957_PROBE") == "from-process-env"
+        assert getattr(config._thread_ctx, "block_process_env_fallback", False) is False
+    finally:
+        profiles.clear_request_profile()
+
+
 def test_active_request_legacy_scope_still_mirrors_process_env(monkeypatch, tmp_path):
     """Live-model request scope still mirrors env for agent-side readers."""
     base = tmp_path / ".hermes"
@@ -294,9 +333,10 @@ def test_providers_and_models_routes_wrap_in_profile_env():
       - /api/models/live stays on the mirrored profile_env_for_active_request
         path because provider_model_ids() still delegates into agent helpers
         that read process env / HERMES_HOME directly.
-      - /api/models relies on get_available_models() scoping its detached
-        rebuild worker via profile_scope_for_detached_worker (the request-thread
-        wrapper cannot reach the worker thread — Codex CORE finding).
+      - /api/models relies on get_available_models() using the mirrored request
+        scope for the budget<=0 sync rebuild plus profile_scope_for_detached_worker
+        for the detached rebuild worker (the request-thread wrapper cannot reach
+        the worker thread — Codex CORE finding).
     """
     routes_src = Path(profiles.__file__).resolve().parent.joinpath("routes.py").read_text(
         encoding="utf-8"
@@ -304,8 +344,56 @@ def test_providers_and_models_routes_wrap_in_profile_env():
     assert 'with profile_env_for_active_request("/api/models/live"' in routes_src
     assert "profile_env_for_active_request_readonly" in routes_src
     config_src = Path(config.__file__).resolve().read_text(encoding="utf-8")
+    assert "profile_env_for_active_request as _prof_env_request" in config_src
     assert "profile_scope_for_detached_worker" in config_src
     assert "_get_models_cache_path" in config_src
+
+
+def test_models_sync_rebuild_uses_legacy_mirrored_env(monkeypatch, tmp_path):
+    """The budget<=0 sync rebuild still mirrors profile env into os.environ."""
+    base = tmp_path / ".hermes"
+    (base / "profiles" / "work").mkdir(parents=True)
+    (base / "profiles" / "work" / ".env").write_text(
+        "ISSUE_3957_PROBE=from-work-profile\n", encoding="utf-8"
+    )
+    monkeypatch.setattr(profiles, "_DEFAULT_HERMES_HOME", base)
+    monkeypatch.setenv("ISSUE_3957_PROBE", "from-process-env")
+    monkeypatch.setattr(config, "_LIVE_REBUILD_BUDGET_SECONDS", 0)
+    monkeypatch.setattr(config, "_available_models_cache", None)
+    monkeypatch.setattr(config, "_available_models_cache_ts", 0.0)
+    monkeypatch.setattr(config, "_available_models_cache_source_fingerprint", None)
+    monkeypatch.setattr(config, "_cache_build_in_progress", False)
+    monkeypatch.setattr(config, "_load_models_cache_from_disk", lambda: None)
+    monkeypatch.setattr(config, "_save_models_cache_to_disk", lambda result: None)
+    monkeypatch.setattr(config, "_models_cache_source_fingerprint", lambda: "issue-3957")
+    seen = {}
+
+    def _capture_rebuild(_builder):
+        seen["process_env"] = os.environ.get("ISSUE_3957_PROBE")
+        seen["thread_env"] = config._thread_local_env_value("ISSUE_3957_PROBE")
+        return {"active_provider": None, "default_model": "", "groups": []}
+
+    monkeypatch.setattr(config, "_invoke_models_rebuild", _capture_rebuild)
+
+    profiles.set_request_profile("work")
+    try:
+        result = config.get_available_models()
+    finally:
+        profiles.clear_request_profile()
+
+    assert seen["process_env"] == "from-work-profile"
+    assert seen["thread_env"] == "from-work-profile"
+    assert os.environ.get("ISSUE_3957_PROBE") == "from-process-env"
+    assert result["groups"] == []
+
+
+def test_thread_local_env_value_none_default_returns_empty_string(monkeypatch):
+    """A None default never escapes the string-return contract."""
+    monkeypatch.setattr(config._thread_ctx, "env", {"ISSUE_3957_NONE": None}, raising=False)
+    monkeypatch.setattr(
+        config._thread_ctx, "block_process_env_fallback", False, raising=False
+    )
+    assert config._thread_local_env_value("ISSUE_3957_NONE", None) == ""
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -403,4 +491,25 @@ def test_detached_worker_prefers_profile_key_for_custom_provider(monkeypatch, tm
     t.start()
     t.join()
     assert out["value"] == "from-worker-profile"
+
+
+def test_account_usage_subprocess_env_blocks_process_default_key(monkeypatch, tmp_path):
+    """Readonly quota probes must not inherit process-default provider keys."""
+    from api.providers import _account_usage_subprocess_env
+
+    base = tmp_path / ".hermes"
+    work_home = base / "profiles" / "work"
+    work_home.mkdir(parents=True)
+    monkeypatch.setattr(profiles, "_DEFAULT_HERMES_HOME", base)
+    monkeypatch.setenv("OPENAI_API_KEY", "from-process-env")
+
+    profiles.set_request_profile("work")
+    try:
+        with profiles.profile_env_for_active_request_readonly("quota probe"):
+            env = _account_usage_subprocess_env(work_home, "openai", None)
+    finally:
+        profiles.clear_request_profile()
+
+    assert env["HERMES_HOME"] == str(work_home)
+    assert "OPENAI_API_KEY" not in env
 
