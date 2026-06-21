@@ -868,6 +868,32 @@ def _apply_profile_env_to_process(
     return previous_env
 
 
+_secret_scope_available = None
+
+
+def _resolve_secret_scope_module():
+    global _secret_scope_available
+    import sys as _sys
+    mod = _sys.modules.get('agent.secret_scope')
+    if mod is not None:
+        return mod
+    if _secret_scope_available is False:
+        return None
+    if _secret_scope_available is None:
+        try:
+            import importlib.util
+            _secret_scope_available = importlib.util.find_spec('agent') is not None
+        except Exception:
+            _secret_scope_available = False
+    if _secret_scope_available:
+        try:
+            from agent.secret_scope import set_secret_scope, reset_secret_scope  # noqa: F401
+            return _sys.modules.get('agent.secret_scope')
+        except ImportError:
+            _secret_scope_available = False
+    return None
+
+
 @contextmanager
 def profile_env_for_background_worker(
     session,
@@ -928,22 +954,15 @@ def profile_env_for_background_worker(
     try:
         _set_thread_env(**thread_env)
         _thread_ctx.block_process_env_fallback = True
-        _secret_scope_mod = None
-        try:
-            _secret_scope_mod = __import__('sys').modules.get('agent.secret_scope')
-            if _secret_scope_mod is None:
-                import importlib.util
-                if importlib.util.find_spec('agent.secret_scope') is not None:
-                    _secret_scope_mod = __import__('agent.secret_scope', fromlist=['set_secret_scope', 'reset_secret_scope'])
-            if _secret_scope_mod is not None:
+        _secret_scope_mod = _resolve_secret_scope_module()
+        _scope_token = None
+        _has_scope = False
+        if _secret_scope_mod is not None:
+            try:
                 _scope_token = _secret_scope_mod.set_secret_scope(thread_env)
                 _has_scope = True
-            else:
-                _scope_token = None
-                _has_scope = False
-        except Exception:
-            _scope_token = None
-            _has_scope = False
+            except Exception:
+                pass
         with _ENV_LOCK:
             old_runtime_env = _apply_profile_env_to_process(
                 os.environ,
@@ -1053,22 +1072,15 @@ def profile_env_for_active_request_readonly(
     try:
         _set_thread_env(**thread_env)
         _thread_ctx.block_process_env_fallback = True
-        _secret_scope_mod = None
-        try:
-            _secret_scope_mod = __import__('sys').modules.get('agent.secret_scope')
-            if _secret_scope_mod is None:
-                import importlib.util
-                if importlib.util.find_spec('agent.secret_scope') is not None:
-                    _secret_scope_mod = __import__('agent.secret_scope', fromlist=['set_secret_scope', 'reset_secret_scope'])
-            if _secret_scope_mod is not None:
+        _secret_scope_mod = _resolve_secret_scope_module()
+        _scope_token = None
+        _has_scope = False
+        if _secret_scope_mod is not None:
+            try:
                 _scope_token = _secret_scope_mod.set_secret_scope(thread_env)
                 _has_scope = True
-            else:
-                _scope_token = None
-                _has_scope = False
-        except Exception:
-            _scope_token = None
-            _has_scope = False
+            except Exception:
+                pass
         if set_hermes_home_override is not None:
             home_override_token = set_hermes_home_override(profile_home_path)
         yield
