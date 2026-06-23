@@ -3,6 +3,8 @@
 
 ## [Unreleased]
 
+## [v0.51.607] — 2026-06-23 — Release VN (empty-profile loading skeleton)
+
 ### Changed
 
 - **Switching into a brand-new / empty profile no longer flashes a misleading "loading conversations" skeleton.** The profile-switch loading skeleton (#4671) always rendered a fixed content shape (group labels + rows); for a profile with zero conversations that implied data which never arrived, then resolved to an empty list — a small "where did my conversations go?" beat. The WebUI now records each profile's last-seen conversation count and, when switching into a profile it already knows has none, shows a quiet empty-state placeholder instead of the content skeleton (an unknown profile still gets the normal skeleton, so a profile that may have conversations is never under-shown). The empty placeholder respects `prefers-reduced-motion` and adapts to light/dark themes. Skipped while a project/source filter is active (the per-profile count is an unfiltered total). Phase 1.5 of the profile-switch UX work. (#4717)
