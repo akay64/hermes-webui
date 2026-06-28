@@ -477,6 +477,21 @@ def _clear_gateway_pending_state(session: Any, stream_id: str) -> None:
     session.save()
 
 
+def _cleanup_gateway_pending_mirror(session_id: str) -> None:
+    try:
+        from api.route_approvals import (
+            _approval_sse_notify_locked,
+            _lock as _approval_lock,
+            reconcile_gateway_pending_mirror_locked,
+        )
+
+        with _approval_lock:
+            head, total, _ = reconcile_gateway_pending_mirror_locked(session_id)
+            _approval_sse_notify_locked(session_id, head, total)
+    except Exception:
+        logger.debug("Failed to reconcile gateway pending mirror during teardown", exc_info=True)
+
+
 def _run_gateway_chat_streaming(
     session_id,
     msg_text,
@@ -888,6 +903,7 @@ def _run_gateway_chat_streaming(
                     _clear_gateway_pending_state(get_session(session_id), stream_id)
             except Exception:
                 logger.debug("Failed to clear gateway stream state", exc_info=True)
+            _cleanup_gateway_pending_mirror(session_id)
         with STREAMS_LOCK:
             CANCEL_FLAGS.pop(stream_id, None)
             STREAM_PARTIAL_TEXT.pop(stream_id, None)
