@@ -210,9 +210,6 @@
   :root[data-skin="graphite"] .tool-arg-key,
   :root[data-skin="graphite"] .tool-card-more,
   :root[data-skin="graphite"] .msg-body a{color:var(--accent-text)!important;}
-  :root[data-skin="graphite"] .app-titlebar-icon rect,
-  :root[data-skin="graphite"] .app-titlebar-icon path,
-  :root[data-skin="graphite"] .app-titlebar-icon circle{color:var(--accent-text)!important;fill:var(--accent-text)!important;}
   :root[data-skin="graphite"] .workspace-panel-edge-toggle,
   :root[data-skin="graphite"] .scroll-to-bottom-btn,
   :root[data-skin="graphite"] .session-jump-btn{box-shadow:0 1px 2px rgba(0,0,0,0.08)!important;background:var(--surface)!important;}
@@ -340,9 +337,6 @@
   :root[data-skin="codex"] .tool-arg-key,
   :root[data-skin="codex"] .tool-card-more,
   :root[data-skin="codex"] .msg-body a{color:var(--accent-text)!important;}
-  :root[data-skin="codex"] .app-titlebar-icon rect,
-  :root[data-skin="codex"] .app-titlebar-icon path,
-  :root[data-skin="codex"] .app-titlebar-icon circle{color:var(--accent-text)!important;fill:var(--accent-text)!important;}
   :root[data-skin="codex"] .workspace-panel-edge-toggle,
   :root[data-skin="codex"] .scroll-to-bottom-btn,
   :root[data-skin="codex"] .session-jump-btn{box-shadow:0 1px 2px rgba(0,0,0,0.08)!important;background:var(--surface)!important;}
@@ -470,9 +464,6 @@
   :root[data-skin="terracotta"] .tool-arg-key,
   :root[data-skin="terracotta"] .tool-card-more,
   :root[data-skin="terracotta"] .msg-body a{color:var(--accent-text)!important;}
-  :root[data-skin="terracotta"] .app-titlebar-icon rect,
-  :root[data-skin="terracotta"] .app-titlebar-icon path,
-  :root[data-skin="terracotta"] .app-titlebar-icon circle{color:var(--accent-text)!important;fill:var(--accent-text)!important;}
   :root[data-skin="terracotta"] .workspace-panel-edge-toggle,
   :root[data-skin="terracotta"] .scroll-to-bottom-btn,
   :root[data-skin="terracotta"] .session-jump-btn{box-shadow:0 1px 2px rgba(0,0,0,0.08)!important;background:var(--surface)!important;}
@@ -600,9 +591,6 @@
   :root[data-skin="github"] .tool-arg-key,
   :root[data-skin="github"] .tool-card-more,
   :root[data-skin="github"] .msg-body a{color:var(--accent-text)!important;}
-  :root[data-skin="github"] .app-titlebar-icon rect,
-  :root[data-skin="github"] .app-titlebar-icon path,
-  :root[data-skin="github"] .app-titlebar-icon circle{color:var(--accent-text)!important;fill:var(--accent-text)!important;}
   :root[data-skin="github"] .workspace-panel-edge-toggle,
   :root[data-skin="github"] .scroll-to-bottom-btn,
   :root[data-skin="github"] .session-jump-btn{box-shadow:0 1px 2px rgba(0,0,0,0.08)!important;background:var(--surface)!important;}
@@ -1020,9 +1008,6 @@
   :root[data-skin="geist-contrast"] .sidebar-search input:focus{border-color:var(--accent)!important;box-shadow:0 0 0 3px var(--focus-ring)!important;outline:none!important;}
   :root[data-skin="geist-contrast"] .logo,
   :root[data-skin="geist-contrast"] .sidebar-header .logo{background:var(--surface-subtle)!important;color:var(--accent-text)!important;border:1px solid var(--border2)!important;border-radius:8px!important;box-shadow:none!important;font-weight:650!important;}
-  :root[data-skin="geist-contrast"] .app-titlebar-icon rect,
-  :root[data-skin="geist-contrast"] .app-titlebar-icon path,
-  :root[data-skin="geist-contrast"] .app-titlebar-icon circle{color:var(--accent-text)!important;fill:var(--accent-text)!important;}
   :root[data-skin="geist-contrast"] .msg-row[data-role="user"] .msg-body{background:var(--surface-subtle)!important;border:1px solid var(--border)!important;border-radius:10px!important;}
   :root[data-skin="geist-contrast"] .suggestion{background:var(--surface)!important;border-color:var(--border)!important;color:var(--muted)!important;transition:background .15s ease,border-color .15s ease,color .15s ease!important;}
   :root[data-skin="geist-contrast"] .suggestion:hover{border-color:var(--border2)!important;color:var(--text)!important;}
