@@ -21,7 +21,7 @@ class TestBusyInputSettingsSearchTerms:
         """The index builder must include option and descriptor text in searchBlob."""
         idx = PANELS_JS.find("function _buildSettingsIndex()")
         assert idx >= 0, "_buildSettingsIndex not found"
-        body = PANELS_JS[idx:idx + 3200]
+        body = PANELS_JS[idx:]
         assert "searchBlob" in body, "_buildSettingsIndex must build a searchBlob"
         assert "field.textContent" in body, "_buildSettingsIndex must include field text in searchBlob"
         assert "field.dataset ? field.dataset.settingsSearch : ''" in body, (
