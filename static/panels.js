@@ -6925,11 +6925,7 @@ function _extractSettingsDescriptionText(field, labelEl) {
   field.querySelectorAll('[data-i18n]').forEach(node => {
     if (labelEl && (node === labelEl || labelEl.contains(node))) return;
     const key = node.dataset ? node.dataset.i18n : null;
-    if (key) {
-      chunks.push(t(key));
-      return;
-    }
-    chunks.push(node.textContent);
+    if (key) chunks.push(t(key));
   });
   return chunks.join(' ');
 }
