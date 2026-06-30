@@ -35,6 +35,9 @@
 
 ### Fixed
 
+- **The Run dispatcher now works on the default Kanban board.** The default board is stored as `null`, and the dispatcher's board check treated that as "no board," so the Run button silently no-opped on the default board. It now resolves the default board correctly and dispatches. Thanks @rodboev. (#5289, fixes #5231)
+- **PWA / deep-link new-chat launches show the empty conversation immediately.** The boot model-dropdown hydration is deferred to the background instead of blocking the first paint, so a new-chat launch from the installed PWA or a deep link renders the composer right away rather than waiting on the model list. Thanks @santastabber. (#5287)
+
 - **Two new opt-in appearance skins: Neon Soft and Neon Paint.** Both are CSS-only, namespaced under `[data-skin]`, registered in server-side skin persistence, and selectable from Settings → Appearance — they change nothing unless you pick them. Neon Soft is a muted purple/violet neon; Neon Paint a bolder magenta + cyan neon. Thanks @savagebread. (#4738)
 
 - **Opt-in Shift+Enter send-key mode.** A new send-key option mirrors the existing Ctrl+Enter mode: when set to "shift+enter", Shift+Enter sends the message and a plain Enter inserts a newline; the default "enter" behavior (Enter sends, Shift+Enter newline) is unchanged when the option is off. IME composition, numpad Enter, and the command-dropdown are all handled, with no double-send. Thanks @futureworld678. (#5005)
