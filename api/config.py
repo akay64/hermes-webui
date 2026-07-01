@@ -2902,10 +2902,32 @@ def parse_reasoning_effort(effort):
     return None
 
 
-def _strip_provider_hint_for_reasoning(model_id: str) -> str:
-    """Remove WebUI routing hints before provider-specific capability lookup."""
+def _strip_provider_hint_for_reasoning(model_id: str, provider: str | None = None) -> str:
+    """Remove WebUI routing hints before provider-specific capability lookup.
+
+    A plain ``@provider:model`` hint strips cleanly on the first colon. But a
+    *named* custom provider hint is ``@custom:<slug>:model`` — two colons —
+    and the naive first-colon split only strips the leading ``@custom:``,
+    leaving ``<slug>:model`` behind. That leftover slug fragment can hide a
+    nested gateway route from prefix-based checks like
+    ``_nested_route_reasoning_denied()`` (e.g. ``agg:vertex/gemini-image-1.0``
+    no longer starts with ``vertex/gemini-``), silently re-enabling reasoning
+    controls on routes that must never expose them.
+
+    When the resolved *provider* is known (e.g. ``"custom:agg"``), strip the
+    exact ``@{provider}:`` prefix first so both segments are removed in one
+    pass. Falls back to the generic first-colon split when no provider is
+    given or it doesn't match — preserving prior behavior for plain
+    ``@provider:model`` hints.
+    """
     model = str(model_id or "").strip()
-    if model.startswith("@") and ":" in model:
+    if not model.startswith("@"):
+        return model
+    if provider:
+        exact_prefix = f"@{provider}:".lower()
+        if model.lower().startswith(exact_prefix):
+            return model[len(exact_prefix) :]
+    if ":" in model:
         return model.split(":", 1)[1]
     return model
 
@@ -3345,7 +3367,7 @@ def resolve_model_reasoning_efforts(
     if provider in {"cursor-acp", "copilot-acp"}:
         return []
 
-    hinted_model = _strip_provider_hint_for_reasoning(model)
+    hinted_model = _strip_provider_hint_for_reasoning(model, provider)
 
     # Master hides reasoning controls for nested image/embedding routes. Keep
     # that hard deny above provider config so an explicit allowlist cannot

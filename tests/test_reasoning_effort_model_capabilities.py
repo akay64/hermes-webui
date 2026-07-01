@@ -227,6 +227,36 @@ def test_nested_route_deny_wins_over_configured_reasoning_efforts(monkeypatch):
             monkeypatch.setitem(cfg.cfg, "custom_providers", original)
 
 
+def test_nested_route_deny_wins_for_provider_qualified_hinted_model(monkeypatch):
+    # Regression for the deeper bypass: a provider-qualified hint like
+    # "@custom:agg:vertex/gemini-image-1.0" must strip BOTH the "@custom:"
+    # wrapper AND the named-provider slug "agg:" before the nested-route
+    # deny check runs. A naive first-colon split only strips "@custom:",
+    # leaving "agg:vertex/gemini-image-1.0" — which no longer starts with
+    # "vertex/gemini-" — so the deny is missed and the configured
+    # ["low", "high"] leaks through on an image/embedding route.
+    original = cfg.cfg.get("custom_providers")
+    monkeypatch.setitem(
+        cfg.cfg,
+        "custom_providers",
+        [{"name": "agg", "reasoning_efforts": ["low", "high"]}],
+    )
+    try:
+        for model in (
+            "@custom:agg:vertex/gemini-image-1.0",
+            "@custom:agg:vertex/gemini-embedding-001",
+        ):
+            assert cfg.resolve_model_reasoning_efforts(
+                model,
+                provider_id="custom:agg",
+            ) == []
+    finally:
+        if original is None:
+            cfg.cfg.pop("custom_providers", None)
+        else:
+            monkeypatch.setitem(cfg.cfg, "custom_providers", original)
+
+
 def test_get_reasoning_status_includes_supported_efforts(monkeypatch):
     monkeypatch.setattr(
         cfg,
