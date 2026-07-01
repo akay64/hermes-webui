@@ -9,6 +9,8 @@ _No unreleased changes. Entries are moved into their version block when a releas
 
 ### Fixed
 
+- **No more false "Clarify endpoint unavailable. Please restart server." toast.** The clarify-pending poll used to fire the restart-server warning on any error whose message merely contained "404"/"not found" — so a harmless stale `Session not found` from a just-switched profile mis-triggered it even though the clarify endpoint was fine. The poll now branches on the structured HTTP status: a session-scoped 404 is treated as a stale poll (silently stops), and the restart warning fires only on a genuine missing-route 404. Interrupt provenance is also now labeled (explicit Stop vs stream-lifecycle) for clearer settlement. (#5345)
+
 - **Ghost sessions can be cleared from the sidebar.** Bulk index-only "Untitled" sessions — rows left in the session index with no backing conversation file — are now pruned by the session cleanup sweep instead of lingering forever and un-removable. A legitimate session (with a saved file or an active in-memory session) is never touched. (#5331)
 
 - **Delegated subagent sessions open correctly and are treated as view-only.** Opening a `delegate_task` subagent child from the sidebar now loads its transcript from Hermes `state.db` instead of showing an empty pane (it has no WebUI sidecar of its own). Subagent children are view-only — owned by the delegate runner — so they render read-only and every session-mutation route (delete / rename / truncate / clear / pin / duplicate / branch / retry / undo / archive / compress / draft / personality / goal / btw) refuses them, preventing accidental edits or deletion of the child's state.db transcript. (#5307)
