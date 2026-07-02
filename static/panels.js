@@ -506,8 +506,12 @@ function _applyCronSchedulePresetSelection() {
   if (!presetEl || !scheduleEl) return;
   const presetId = presetEl.value;
   const preset = CRON_SCHEDULE_PRESETS.find((entry) => entry.id === presetId);
-  if (preset && preset.value) scheduleEl.value = preset.value;
-  _syncCronSchedulePresetAndWarning();
+  if (preset && preset.value) {
+    scheduleEl.value = preset.value;
+    _syncCronSchedulePresetAndWarning();
+    return;
+  }
+  _syncCronScheduleWarning();
 }
 
 function _initCronSchedulePresetControls() {

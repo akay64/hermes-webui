@@ -35,7 +35,7 @@ def _cron_schedule_save_source() -> str:
         pytest.fail("saveCronForm is missing")
     end = src.find("// Back-compat aliases for any stale callers", start)
     if end < 0:
-        end = len(src)
+        pytest.fail("saveCronForm boundary marker is missing")
     return src[start:end]
 
 
@@ -156,6 +156,11 @@ elements.cronFormSchedulePreset.dispatchEvent('change');
 const presetWriteValue = elements.cronFormSchedule.value;
 const selectAfterPresetWrite = elements.cronFormSchedulePreset.value;
 
+elements.cronFormSchedulePreset.value = "custom";
+elements.cronFormSchedulePreset.dispatchEvent('change');
+const preservedExactPresetValue = elements.cronFormSchedule.value;
+const selectAfterExactPresetCustom = elements.cronFormSchedulePreset.value;
+
 elements.cronFormSchedule.value = "advanced: cron expression";
 elements.cronFormSchedule.dispatchEvent('input');
 elements.cronFormSchedulePreset.value = "custom";
@@ -170,6 +175,8 @@ console.log(JSON.stringify({
   warningAfterOnce,
   presetWriteValue,
   selectAfterPresetWrite,
+  preservedExactPresetValue,
+  selectAfterExactPresetCustom,
   preservedCustomValue,
   selectAfterCustom,
 }));
@@ -182,6 +189,8 @@ console.log(JSON.stringify({
     assert result["warningAfterOnce"] == ""
     assert result["presetWriteValue"] == "every 1h"
     assert result["selectAfterPresetWrite"] == "hourly"
+    assert result["preservedExactPresetValue"] == "every 1h"
+    assert result["selectAfterExactPresetCustom"] == "custom"
     assert result["preservedCustomValue"] == "advanced: cron expression"
     assert result["selectAfterCustom"] == "custom"
 
