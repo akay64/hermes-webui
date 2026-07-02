@@ -45,7 +45,11 @@ def test_profile_dropdown_opens_shell_before_network_fetch():
 def test_profile_dropdown_uses_shared_fetch_promise_and_validated_local_storage_cache():
     data_cache_body = _function_body(PANELS_JS, "function _profileDropdownDataCacheUsable(data){")
     assert "Array.isArray(data.profiles)" in data_cache_body
-    assert "data.profiles.every(p=>p&&typeof p.name==='string')" in data_cache_body
+    assert "data.profiles.every(" in data_cache_body
+    assert "typeof p.name==='string'" in data_cache_body
+    # #5412 gate: the predicate must also reject rows whose renderer-read `model`
+    # field is a non-string truthy value (poison {name,model:{}} bricked the dropdown).
+    assert "typeof p.model==='string'" in data_cache_body
 
     cache_body = _function_body(PANELS_JS, "function _profileDropdownCacheUsable(data){")
     assert "_profileDropdownDataCacheUsable(data)" in cache_body
@@ -259,6 +263,14 @@ def test_poisoned_profile_cache_opens_then_switches_after_fresh_refresh():
         (async () => {{
           await runPoisonedCase([null]);
           await runPoisonedCase([{{}}]);
+          // Regression (#5412 gate): a row that PASSES the name check but has a
+          // non-string `model` used to slip the cache predicate and throw
+          // `p.model.split is not a function` synchronously on dropdown open,
+          // bricking profile switching until localStorage was cleared. The
+          // predicate must now reject it (usable===false) AND the renderer must
+          // not throw even if such a row reaches it.
+          await runPoisonedCase([{{ name: 'default', is_default: true, model: {{}} }}, {{ name: 'other', visible: true }}]);
+          await runPoisonedCase([{{ name: 'default', is_default: true, model: 123 }}, {{ name: 'other', visible: true }}]);
           await runSingleProfilePreservesSharedCache();
           await runFreshSingleProfileReplacesStaleMultiCache();
         }})().catch((err) => {{ console.error(err && err.stack || err); process.exit(1); }});

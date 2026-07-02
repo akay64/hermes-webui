@@ -5938,7 +5938,16 @@ function _profileDropdownDataCacheUsable(data){
     data &&
     Array.isArray(data.profiles) &&
     data.profiles.length &&
-    data.profiles.every(p=>p&&typeof p.name==='string')
+    data.profiles.every(p=>
+      p &&
+      typeof p.name==='string' &&
+      // Renderer-read fields must be safe types: renderProfileDropdown /
+      // renderProfilesPanel call p.model.split('/') guarded only by truthiness,
+      // so a poisoned cached row like {name:"x", model:{}} would pass a
+      // name-only check yet throw synchronously on dropdown open (bricking
+      // profile switching). Reject rows whose model is a non-string truthy value.
+      (p.model==null || typeof p.model==='string')
+    )
   );
 }
 
@@ -6112,7 +6121,7 @@ async function loadProfilesPanel() {
       card.className = 'profile-card';
       card.dataset.name = p.name;
       const meta = [];
-      if (p.model) meta.push(p.model.split('/').pop());
+      if (typeof p.model === 'string' && p.model) meta.push(p.model.split('/').pop());
       if (p.provider) meta.push(p.provider);
       if (p.total_skills && p.total_skills > 0) meta.push(t('profile_skill_count', p.total_skills).replace(String(p.total_skills), `${p.enabled_skills} / ${p.total_skills}`));
       const gwDot = p.gateway_running
@@ -6291,7 +6300,7 @@ function renderProfileDropdown(data) {
     const opt = document.createElement('div');
     opt.className = 'profile-opt' + (p.name === active ? ' active' : '');
     const meta = [];
-    if (p.model) meta.push(p.model.split('/').pop());
+    if (typeof p.model === 'string' && p.model) meta.push(p.model.split('/').pop());
     if (p.total_skills && p.total_skills > 0) meta.push(t('profile_skill_count', p.total_skills).replace(String(p.total_skills), `${p.enabled_skills} / ${p.total_skills}`));
     const gwDot = `<span class="profile-opt-badge ${p.gateway_running ? 'running' : 'stopped'}"></span>`;
     const checkmark = p.name === active ? ' <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="var(--link)" stroke-width="3" style="vertical-align:-1px"><polyline points="20 6 9 17 4 12"/></svg>' : '';
