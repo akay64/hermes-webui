@@ -176,6 +176,25 @@ def test_session_list_render_signature_changes_on_pending_running_and_attention(
     assert "JSON.stringify([" in block
 
 
+def test_session_list_render_signature_does_not_skip_recovering_from_skeleton_or_error():
+    """The render-skip must never fire when recovering from a skeleton or the
+    'Could not load conversations' banner — both are rendered OUTSIDE the
+    signature path, so an identical-signature match (empty/same-shaped profile,
+    or a transient fetch failure healing with identical rows) would leave the
+    skeleton/error DOM on screen instead of the real list. (Codex #5467 re-gate)
+    """
+    start = SESSIONS_JS.find("function _applySessionListPayload(")
+    assert start != -1
+    body = SESSIONS_JS[start:start + 6000]
+    assert "const _hadSessionListSkeleton = _sessionListSkeletonActive;" in body
+    assert "const _hadSessionListLoadError = !!_sessionListLoadError;" in body
+    assert "const _mustForceRender = _hadSessionListSkeleton || _hadSessionListLoadError;" in body
+    assert "!_mustForceRender" in body, "the force flag must gate the identical-signature skip"
+    # captured BEFORE the respective clears
+    assert body.index("const _hadSessionListSkeleton") < body.index("_sessionListSkeletonActive = false;")
+    assert body.index("const _hadSessionListLoadError") < body.index("_sessionListLoadError = null;")
+
+
 def test_pwa_pull_to_refresh_refreshes_session_list_not_page_when_available():
     assert "window.refreshSessionList('pull', {force:true, refreshActive:true})" in UI_JS
     assert "Promise.resolve(window.refreshSessionList('pull', {force:true, refreshActive:true})).catch(()=>{}).finally(_ptrReset)" in UI_JS

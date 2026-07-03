@@ -4436,6 +4436,11 @@ function _applySessionListPayload(sessData, projData){
   _syncSessionAttentionSoundState(_allSessions);
   _pruneLineageReportCacheToVisibleSessions(_allSessions);
   _allProjects = projData.projects||[];
+  // Capture the recovering-from-error state BEFORE clearing it: the error banner
+  // DOM was rendered outside the signature path, so if this payload heals with
+  // rows identical to the last render, the identical-signature skip below would
+  // leave the stale "Could not load conversations" banner on screen. (Codex #5467)
+  const _hadSessionListLoadError = !!_sessionListLoadError;
   _sessionListLoadError = null;
   _sessionListHasLoadedOnce = true;
   _markPollingCompletionUnreadTransitions(_allSessions);
@@ -4457,6 +4462,7 @@ function _applySessionListPayload(sessData, projData){
   // holds the CURRENT profile's rows. Clear the skeleton flag right before painting so this
   // authoritative render replaces the profile-switch skeleton — while unrelated renders that
   // fire before this point stay blocked by the guard in renderSessionListFromCache().
+  const _hadSessionListSkeleton = _sessionListSkeletonActive;
   _sessionListSkeletonActive = false;
   // No-op fast path: if this payload renders identically to what is already on
   // screen (the common case for idle polls) and no entrance animation is
@@ -4465,9 +4471,13 @@ function _applySessionListPayload(sessData, projData){
   // renderSessionListFromCache directly and are unaffected. Guarded by the same
   // conditions renderSessionListFromCache bails on, so a bailed render never
   // caches a signature that would suppress the next real repaint. (#5455 WS2.4)
+  // NEVER skip when recovering from a skeleton or error-banner DOM state: those
+  // are rendered outside the signature path, so an identical-signature match
+  // would leave the skeleton/error on screen instead of the real list. (Codex #5467)
   const _canRenderNow = !_renamingSid && !_sessionActionMenu;
+  const _mustForceRender = _hadSessionListSkeleton || _hadSessionListLoadError;
   const _renderSig = _sessionListRenderSignature();
-  if(_canRenderNow && !_sessionListRefreshAnimationPending && _renderSig && _renderSig===_lastSessionListRenderSig){
+  if(_canRenderNow && !_mustForceRender && !_sessionListRefreshAnimationPending && _renderSig && _renderSig===_lastSessionListRenderSig){
     // Preserve the per-refresh INFLIGHT cleanup that renderSessionListFromCache
     // would otherwise perform, then skip only the DOM rebuild.
     if(typeof _purgeStaleInflightEntries==='function') _purgeStaleInflightEntries();
