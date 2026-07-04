@@ -84,6 +84,17 @@ class TestEndpointDistinction:
             "RFC must explicitly state the two endpoints are distinct"
         )
 
+    def test_rfc_cites_current_global_endpoint_source(self):
+        text = _rfc()
+        assert "api/routes.py:12320-12321" in text, (
+            "RFC must cite the current global sessions/events route match"
+        )
+        assert "api/routes.py:16142" in text, (
+            "RFC must cite the current _handle_session_events_stream definition"
+        )
+        assert "api/routes.py:12296-12297" not in text
+        assert "api/routes.py:16118" not in text
+
     def test_contracts_distinguishes_both_endpoints(self):
         text = _contracts()
         assert "/api/sessions/{session_id}/events" in text, (
@@ -158,7 +169,7 @@ class TestHeartbeat:
     def test_rfc_does_not_add_new_heartbeat_knob(self):
         text = _rfc()
         assert "new per-session configurable heartbeat" not in text or (
-            "not** added" in text or "not added" in text.lower()
+            "not added" in text.replace("*", "").lower()
         ), (
             "RFC must not add a new per-session heartbeat knob in Phase 1"
         )

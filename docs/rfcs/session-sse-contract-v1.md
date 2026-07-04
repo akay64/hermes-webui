@@ -38,7 +38,8 @@ against current source before any route is added.
 - This RFC does **not** implement `GET /api/sessions/{session_id}/events`. No
   route, handler, or related code is added in this PR.
 - This RFC does **not** modify `GET /api/sessions/events` (the existing global
-  session-list invalidation stream at `api/routes.py:16118`).
+  session-list invalidation stream routed at `api/routes.py:12320-12321` and
+  implemented by `_handle_session_events_stream()` at `api/routes.py:16142`).
 - This RFC does **not** replace or modify existing streams: `/api/chat/stream`,
   `/api/approval/stream`, or `/api/clarify/stream`.
 - This RFC does **not** introduce Android, iOS, or PWA client code.
@@ -52,8 +53,8 @@ against current source before any route is added.
 ### Existing global session-list stream
 
 `GET /api/sessions/events` is a **different endpoint** from the one this RFC
-proposes. It is routed at `api/routes.py:12296-12297` and implemented by
-`_handle_session_events_stream()` at `api/routes.py:16118-16131`. It emits bare
+proposes. It is routed at `api/routes.py:12320-12321` and implemented by
+`_handle_session_events_stream()` at `api/routes.py:16142`. It emits bare
 `sessions_changed` events and keepalives for any change to the session list. It
 is a global invalidation signal, not a per-session lifecycle stream. The proposed
 `GET /api/sessions/{session_id}/events` is per-session and path-distinct.
@@ -67,6 +68,10 @@ adding a separate configurable knob.
 ### Run-journal cursor and replay
 
 Current replay identity is run/stream-scoped:
+
+Line ranges in this inventory were verified against WebUI `master` when this
+RFC was written. Function, constant, and endpoint names are the stable anchors
+if source layout moves later.
 
 - `_parse_run_journal_event_id()` and `_parse_run_journal_after_seq()` at
   `api/routes.py:15638-15665` parse the cursor from `Last-Event-ID`.
