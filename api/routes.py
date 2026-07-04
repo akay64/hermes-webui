@@ -13695,11 +13695,42 @@ def handle_post(handler, parsed) -> bool:
         sid = body["session_id"]
         with _get_session_agent_lock(sid):
             had_sidecar_messages = bool(s.messages or [])
-            s.messages = []
+            # Clear is a full truncate-to-empty: route through the SAME helper the
+            # /api/session/truncate handler uses (single source of truth) so the
+            # display + context arrays are emptied AND the truncation watermark is
+            # set via _truncation_watermark_for([]) == 0.0 — the #2914
+            # truncate-to-empty sentinel that blocks state.db replay. Before this,
+            # /clear wiped s.messages but left the watermark unset, so the
+            # append-only state.db merge treated it as "keep everything" and the
+            # cleared history resurrected on the next /api/session read (#5532).
+            from api.session_ops import truncate_session_at_keep
+            truncate_session_at_keep(s, 0)
             s.tool_calls = []
-            s.context_messages = []
-            s.truncation_watermark = 0.0
-            s.truncation_boundary = 0.0
+            # A compressed-continuation child keeps its archived transcript in a
+            # parent sidecar marked pre_compression_snapshot;
+            # _webui_sidecar_lineage_messages_for_display() stitches that parent
+            # back with truncation_watermark=None, so the 0.0 sentinel on the
+            # CHILD does NOT stop the parent from resurrecting the cleared history
+            # on refresh. Detach the compression lineage (#5532/#5553) — but ONLY
+            # when the parent is actually a pre_compression_snapshot; a genuine
+            # fork parent (session_source="fork" from /api/session/branch) must
+            # keep its link so the child still nests + shows "Forked from"
+            # (sessions.js:5720/5964/7105). Dropping every parent broke that
+            # (#5532 Codex gate).
+            _parent_sid = getattr(s, "parent_session_id", None)
+            if _parent_sid:
+                _parent_is_compression_snapshot = False
+                try:
+                    _parent = get_session(_parent_sid, metadata_only=True)
+                    _parent_is_compression_snapshot = bool(
+                        getattr(_parent, "pre_compression_snapshot", False)
+                    )
+                except Exception:
+                    _parent_is_compression_snapshot = False
+                if _parent_is_compression_snapshot:
+                    s.parent_session_id = None
+                    s.compression_anchor_visible_idx = None
+                    s.compression_anchor_message_key = None
             s.active_stream_id = None
             s.pending_user_message = None
             s.pending_attachments = []
