@@ -13399,7 +13399,10 @@ function renderMessages(options){
     const readOnlySession=typeof _isReadOnlySession==='function'
       ? _isReadOnlySession(S.session)
       : !!(S.session&&(S.session.read_only||S.session.is_read_only));
-    const forkBtn  = readOnlySession ? '' : `<button class="msg-action-btn" title="${t('fork_from_here')}" onclick="forkFromMessage(${rawIdx+1})">${li('git-branch',13)}</button>`;
+    const branchableReadOnlySession=typeof _isBranchableReadOnlySession==='function'
+      ? _isBranchableReadOnlySession(S.session)
+      : false;
+    const forkBtn  = (readOnlySession&&!branchableReadOnlySession) ? '' : `<button class="msg-action-btn" title="${t('fork_from_here')}" onclick="forkFromMessage(${rawIdx+1})">${li('git-branch',13)}</button>`;
     const ttsBtn   = !isUser ? `<button class="msg-action-btn msg-tts-btn" title="${t('tts_listen')||'Listen'}" onclick="speakMessage(this)">${li('volume-2',13)}</button>` : '';
     const tsVal=m._ts||m.timestamp;
     // _formatInServerTz handles fractional-hour offsets (India +0530 etc.)

@@ -2006,6 +2006,19 @@ function _isReadOnlySession(session) {
   return !!(session && (session.read_only || session.is_read_only));
 }
 
+function _isBranchableReadOnlySession(session) {
+  if (!_isReadOnlySession(session)) return false;
+  const sources = [
+    session && session.source_tag,
+    session && session.raw_source,
+    session && session.source,
+    session && session.session_source,
+    session && session.source_label,
+  ].map(v => String(v || '').trim().toLowerCase());
+  const sid = String(session && session.session_id || '').toLowerCase();
+  return sources.includes('cron') || sid.startsWith('cron_');
+}
+
 function _sourceKeyForSession(session) {
   return (session && (session.raw_source || session.source_tag || session.source || '') || '').toLowerCase();
 }
