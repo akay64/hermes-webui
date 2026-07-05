@@ -483,6 +483,7 @@ function showCompressionRecoveryContinuationHint(){
 async function startCompressionRecovery(btn){
   const sourceSid=String((btn&&btn.dataset&&btn.dataset.recoverySessionId)||(S.session&&S.session.session_id)||'').trim();
   if(!sourceSid) return;
+  let retiredRecoveryCard=false;
   if(btn){btn.disabled=true;btn.classList.add('loading');}
   try{
     const data=await api('/api/session/compression-recovery/start',{method:'POST',body:JSON.stringify({session_id:sourceSid})});
@@ -497,9 +498,26 @@ async function startCompressionRecovery(btn){
     const composer=$('msg');
     if(composer&&typeof composer.focus==='function') composer.focus();
   }catch(e){
+    // A 409 means this session no longer has an active recovery action (the
+    // session already moved on — e.g. a substantive prompt cleared it). The
+    // persisted card in the transcript is stale, so retire it and show a neutral
+    // note instead of a raw error. The server is authoritative on availability.
+    if(e&&e.status===409){
+      const staleCard=(btn&&btn.closest&&btn.closest('.compression-recovery-card'))
+        ||document.querySelector('[data-compression-recovery-card="1"]');
+      if(staleCard){
+        staleCard.setAttribute('data-compression-recovery-consumed','1');
+        const staleBtn=staleCard.querySelector('.compression-recovery-action');
+        if(staleBtn){staleBtn.disabled=true;staleBtn.classList.remove('loading');}
+        retiredRecoveryCard=true;
+      }
+      if(typeof showToast==='function') showToast('This conversation already moved on — the focused-continuation action is no longer available.',4000,'info');
+      return;
+    }
     if(typeof showToast==='function') showToast('Compression recovery failed: '+(e&&e.message||e),5000,'error');
   }finally{
-    if(btn){btn.disabled=false;btn.classList.remove('loading');}
+    // Do NOT re-enable a button we deliberately retired in the 409 branch.
+    if(btn){if(!retiredRecoveryCard) btn.disabled=false;btn.classList.remove('loading');}
   }
 }
 

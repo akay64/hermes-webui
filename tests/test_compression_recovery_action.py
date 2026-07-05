@@ -443,3 +443,25 @@ def test_compression_recovery_ui_skips_message_fallback_after_session_clear():
     assert session_guard in body
     assert message_scan in body
     assert body.index(session_guard) < body.index(message_scan)
+
+
+def test_compression_recovery_action_handles_stale_card_409():
+    """A 409 (recovery already cleared) must be mapped to a neutral note and the
+    stale card retired — not surfaced as a raw 'Compression recovery failed' error.
+    """
+    ui = (ROOT / "static/ui.js").read_text(encoding="utf-8")
+    start = ui.index("async function startCompressionRecovery(btn){")
+    end = ui.index("\n}", ui.index("finally", start))
+    body = ui[start:end]
+
+    # Branches on the HTTP status the api() wrapper attaches (err.status).
+    assert "e.status===409" in body
+    # Retires the stale persisted card so it is no longer clickable.
+    assert "data-compression-recovery-consumed" in body
+    # Neutral/info toast, not the generic error path.
+    assert "no longer available" in body
+    # The 409 branch returns before falling through to the generic error toast.
+    assert body.index("e.status===409") < body.index("Compression recovery failed:")
+    # The finally-block must NOT re-enable a retired stale-card button.
+    assert "retiredRecoveryCard" in body
+    assert "if(!retiredRecoveryCard) btn.disabled=false" in body
