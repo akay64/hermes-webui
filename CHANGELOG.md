@@ -12,6 +12,16 @@
 - **Scheduled jobs get a preset schedule builder.** The cron job form now has a "Preset" dropdown (Hourly / Daily / Weekdays / Weekly / Monthly, plus Custom) above the Schedule field — pick one and it fills the schedule for you (e.g. Daily → `0 9 * * *`, Hourly → `every 1h`) instead of hand-writing a cron expression. "Custom" keeps the free-text field, and editing an existing job maps its schedule back to the matching preset. Thanks @rodboev. (#5438, #5427)
 - **Add a self-hosted provider (Ollama or LM Studio) from Settings.** After onboarding, a new Settings control lets you point WebUI at a local OpenAI-compatible model server (Ollama / LM Studio) by choosing the provider, model, and base URL — no hand-editing `config.yaml`. The base URL is validated (scheme + provider allowlist) and persisted for the agent's provider client. An optional "Test connection" button reuses the existing authenticated onboarding probe to fetch the model list from the URL you enter. Thanks @rodboev. (#5408, #3260)
 
+### Documentation
+
+- **Documented the `HERMES_WEBUI_*` environment variables and refreshed stale version/test/locale references.** README, ARCHITECTURE, TESTING, ROADMAP, SPRINTS, and the `.env` example files now describe the supported runtime env vars (host/port/state-dir/agent-dir/home) and no longer carry stale hardcoded version/test-count/locale figures. Thanks @mo7al876any. (#5536)
+- **Documented the gateway approval-runs API opt-in.** `docs/advanced-chat-setup.md` and `docs/docker.md` now explain how to enable and use the gateway approval-runs API. Thanks @rodboev. (#5549, #5269)
+
+### Internal
+
+- **Test suite reads static assets as UTF-8 so it runs on Windows.** 34 test files that opened `static/` assets without an explicit encoding now pass `encoding="utf-8"`, so the suite no longer fails under a non-UTF-8 default locale (Windows `cp1252`). Two method signatures over-matched by the encoding sweep were reverted. Assertions are unchanged. Thanks @mo7al876any. (#5537)
+- **Added regression coverage for messaging clear-watermark semantics.** New test locks the watermark behavior so a future change can't silently regress it. Thanks @rodboev. (#5589, #5572)
+
 ### Fixed
 
 - **Compacted (archived) messages no longer creep back into the model's context.** In-place context compaction marks old messages inactive in `state.db`, but WebUI's reconciliation reader still pulled those archived rows back into the next turn's model-facing context — undoing the compaction and making long conversations re-trigger compression every turn. The reader now excludes inactive rows by default (with an explicit opt-in for recovery/audit views), so compaction actually sticks. Schemas without the active-row marker are unaffected. Thanks @ai-ag2026. (#5626)
