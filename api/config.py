@@ -7598,7 +7598,17 @@ def get_available_models_for_session_visit() -> dict:
 
 
 # ── Static file path ─────────────────────────────────────────────────────────
-_INDEX_HTML_PATH = REPO_ROOT / "static" / "index.html"
+
+
+def get_static_root() -> Path:
+    return REPO_ROOT / "static"
+
+
+def get_index_html_path() -> Path:
+    return get_static_root() / "index.html"
+
+
+_INDEX_HTML_PATH = get_index_html_path()
 
 # ── Thread synchronisation ───────────────────────────────────────────────────
 LOCK = threading.Lock()
