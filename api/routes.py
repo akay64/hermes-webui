@@ -9204,6 +9204,15 @@ _LOGIN_LOCALE = {
         "invalid_pw": "M\u1eadt kh\u1ea9u kh\u00f4ng h\u1ee3p l\u1ec7",
         "conn_failed": "K\u1ebft n\u1ed1i th\u1ea5t b\u1ea1i",
     },
+    "cs": {
+        "lang": "cs-CZ",
+        "title": "P\u0159ihl\u00e1sit se",
+        "subtitle": "Zadejte heslo pro pokra\u010dov\u00e1n\u00ed",
+        "placeholder": "Heslo",
+        "btn": "P\u0159ihl\u00e1sit se",
+        "invalid_pw": "Neplatn\u00e9 heslo",
+        "conn_failed": "P\u0159ipojen\u00ed selhalo",
+    },
 }
 
 
