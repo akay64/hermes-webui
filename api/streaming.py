@@ -8720,7 +8720,6 @@ def _run_agent_streaming(
                             _err_hint,
                         )
                         _pending_source = getattr(s, 'pending_user_source', None) or 'webui'
-                        _materialize_pending_user_turn_before_error(s)
                         if _pending_source == 'process_wakeup':
                             record_process_wakeup_provider_unavailable_pause(
                                 s,
@@ -8728,6 +8727,7 @@ def _run_agent_streaming(
                                 model=getattr(s, 'model', None) or resolved_model or model,
                                 provider=getattr(s, 'model_provider', None) or resolved_provider,
                             )
+                        _materialize_pending_user_turn_before_error(s)
                         s.active_stream_id = None
                         s.pending_user_message = None
                         s.pending_attachments = []
@@ -9198,7 +9198,6 @@ def _run_agent_streaming(
                         logger.debug("Failed to append cancelled turn journal event", exc_info=True)
                     put('cancel', _cancel_event_payload('Cancelled by user'))
                     return
-                clear_process_wakeup_pause(s, reason='run_completed')
                 with _stream_writeback_stage(_writeback_timings, "session_save"):
                     s.save()
                 if cancel_event.is_set():
@@ -9295,6 +9294,9 @@ def _run_agent_streaming(
                         )
                 except Exception:
                     logger.debug("Failed to sync session to insights")
+            if clear_process_wakeup_pause(s, reason='run_completed'):
+                with _stream_writeback_stage(_writeback_timings, "process_wakeup_pause_clear_save"):
+                    s.save(touch_updated_at=False)
             usage = {
                 'input_tokens': input_tokens,
                 'output_tokens': output_tokens,
@@ -9809,7 +9811,6 @@ def _run_agent_streaming(
                     return
 
                 _pending_source = getattr(s, 'pending_user_source', None) or 'webui'
-                _materialize_pending_user_turn_before_error(s)
                 if _pending_source == 'process_wakeup':
                     record_process_wakeup_provider_unavailable_pause(
                         s,
@@ -9817,6 +9818,7 @@ def _run_agent_streaming(
                         model=getattr(s, 'model', None) or resolved_model or model,
                         provider=getattr(s, 'model_provider', None) or resolved_provider,
                     )
+                _materialize_pending_user_turn_before_error(s)
                 s.active_stream_id = None
                 s.pending_user_message = None
                 s.pending_attachments = []
