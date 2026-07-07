@@ -262,7 +262,7 @@ work has shifted from "reach parity" to "harden reliability + widen distribution
 
 ### Internationalization
 - [x] 15 locales — English, Italian, Japanese, Russian, Spanish, German, Chinese (zh + zh-Hant), Portuguese, Korean, French, Czech, Turkish, Polish, Vietnamese
-- [x] Full translation coverage across all non-English locales (no English fallback strings)
+- [x] Near-full translation coverage across non-English locales — a small English-fallback tail remains on recently added keys (measured ~2% for Czech up to ~15% for Turkish), backfilled by periodic translation passes
 - [x] Key-parity test ensures every locale has every key
 - [x] Right-to-left and CJK input (IME composition fixes)
 
