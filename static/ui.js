@@ -16894,7 +16894,18 @@ function loadDiffInline(container){
 
 const CSV_MAX_SIZE=256*1024; // 256 KB cap for inline CSV rendering
 
-function buildCsvTablePreview(path, text){
+function _mediaSessionQuery(){
+  const mediaSessionId=(typeof S!=='undefined'&&S&&S.session&&S.session.session_id)?String(S.session.session_id):'';
+  return mediaSessionId?'&session_id='+encodeURIComponent(mediaSessionId):'';
+}
+
+function _csvMediaUrl(path, opts={}){
+  let url='api/media?path='+encodeURIComponent(path)+_mediaSessionQuery();
+  if(opts.download) url+='&download=1';
+  return url;
+}
+
+function buildCsvTablePreview(path, text, downloadUrl=''){
   if(typeof text!=='string') return {errorKey:'csv_error'};
   if(text.length>CSV_MAX_SIZE) return {errorKey:'csv_too_large'};
   const rows=text.replace(/\r\n/g,'\n').replace(/\r/g,'\n').split('\n').filter(r=>r.trim());
@@ -16909,13 +16920,19 @@ function buildCsvTablePreview(path, text){
   const headers=rows[0].split(sep).map(c=>c.trim().replace(/^["']|["']$/g,''));
   const bodyRows=rows.slice(1).map(r=>'<tr>'+r.split(sep).map(c=>`<td>${esc(c.trim().replace(/^["']|["']$/g,''))}</td>`).join('')+'</tr>').join('');
   const headerRow=headers.map(h=>`<th>${esc(h)}</th>`).join('');
+  const fname=path.split('/').pop()||path;
+  const downloadLink=downloadUrl
+    ? `<a class="csv-download-link msg-media-link" href="${esc(downloadUrl)}" download="${esc(fname)}">📎 ${esc(fname)}</a>`
+    : '';
   return {
-    html:`<div class="csv-table-wrap"><div class="pre-header">${esc(path.split('/').pop())} <span style="opacity:.5;font-size:11px">${t('csv_header_note')}</span></div><table class="csv-table"><thead><tr>${headerRow}</tr></thead><tbody>${bodyRows}</tbody></table></div>`,
+    html:`<div class="csv-table-wrap"><div class="pre-header csv-preview-header"><span class="csv-preview-title">${esc(fname)} <span style="opacity:.5;font-size:11px">${t('csv_header_note')}</span></span>${downloadLink}</div><table class="csv-table"><thead><tr>${headerRow}</tr></thead><tbody>${bodyRows}</tbody></table></div>`,
   };
 }
 
 function _csvPreviewErrorHtml(path, errorKey){
-  return `<div class="diff-inline-error">${esc(path.split('/').pop())}<br><span style="color:var(--muted);font-size:12px">${t(errorKey)}</span></div>`;
+  const fname=path.split('/').pop()||path;
+  const downloadUrl=_csvMediaUrl(path,{download:true});
+  return `<div class="diff-inline-error">${esc(fname)}<br><a class="msg-media-link" href="${esc(downloadUrl)}" download="${esc(fname)}">📎 ${esc(fname)}</a><br><span style="color:var(--muted);font-size:12px">${t(errorKey)}</span></div>`;
 }
 
 function loadCsvInline(container){
@@ -16923,10 +16940,12 @@ function loadCsvInline(container){
   root.querySelectorAll('.csv-inline-load:not([data-loaded])').forEach(el=>{
     el.setAttribute('data-loaded','1');
     const path=el.dataset.path;
-    fetch('api/media?path='+encodeURIComponent(path))
+    const mediaUrl=_csvMediaUrl(path);
+    const downloadUrl=_csvMediaUrl(path,{download:true});
+    fetch(mediaUrl)
       .then(r=>{if(!r.ok) throw new Error(r.status);return r.text();})
       .then(text=>{
-        const preview=buildCsvTablePreview(path, text);
+        const preview=buildCsvTablePreview(path, text, downloadUrl);
         el.outerHTML=preview.html||_csvPreviewErrorHtml(path, preview.errorKey||'csv_error');
       })
       .catch(()=>{

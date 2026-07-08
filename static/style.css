@@ -2474,6 +2474,9 @@
 
   /* ── CSV table rendering ── */
   .csv-table-wrap{margin:6px 0;overflow-x:auto;border:1px solid var(--border);border-radius:8px;background:var(--surface);}
+  .csv-preview-header{justify-content:space-between;flex-wrap:wrap;row-gap:6px;}
+  .csv-preview-title{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
+  .csv-download-link{margin-left:auto;text-transform:none;letter-spacing:0;font-size:12px;}
   .csv-table{width:100%;border-collapse:collapse;font-size:13px;}
   .csv-table thead{position:sticky;top:0;z-index:1;}
   .csv-table th{background:var(--hover-bg);font-weight:600;text-align:left;padding:8px 12px;border-bottom:2px solid var(--border2);white-space:nowrap;user-select:none;}
