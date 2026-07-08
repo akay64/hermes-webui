@@ -599,7 +599,7 @@ def _update_config_payload(body):
 
     config_path = config._get_config_path()
     with config._cfg_lock:
-        config_data = config._load_yaml_config_file(config_path)
+        config_data = config._load_yaml_config_file_raw(config_path)
         dashboard_cfg = config_data.get("dashboard")
         if not isinstance(dashboard_cfg, dict):
             dashboard_cfg = {}

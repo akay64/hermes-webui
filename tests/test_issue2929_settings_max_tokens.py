@@ -170,6 +170,61 @@ def test_set_max_tokens_writes_root_override_and_clears_back_to_agent_fallback(m
     assert data["metadata"]["keep"] is True
 
 
+def test_set_hermes_default_model_preserves_env_var_references(monkeypatch):
+    """Changing the default model must not expand ${VAR} references in
+    unrelated sections when saving config.yaml."""
+    import api.config as config
+
+    monkeypatch.setenv("OPENAI_API_KEY", "expanded-secret")
+    _write_config(
+        "model:\n"
+        "  default: gpt-4o\n"
+        "  provider: openai\n"
+        "providers:\n"
+        "  openai:\n"
+        "    api_key: ${OPENAI_API_KEY}\n"
+        "metadata:\n"
+        "  keep: true\n"
+    )
+    monkeypatch.setattr(config, "reload_config", lambda: None)
+    result = config.set_hermes_default_model("gpt-5.4", provider="openai")
+    assert result.get("ok") is True
+    raw = config._load_yaml_config_file_raw(config._get_config_path())
+    assert raw["providers"]["openai"]["api_key"] == "${OPENAI_API_KEY}", (
+        "${VAR} reference was expanded — leaked secret into config.yaml"
+    )
+    assert raw["model"]["default"] == "gpt-5.4"
+    assert raw["metadata"]["keep"] is True
+
+
+def test_set_auxiliary_model_preserves_env_var_references(monkeypatch):
+    """Setting an auxiliary model must not expand ${VAR} references in
+    unrelated sections when saving config.yaml."""
+    import api.config as config
+
+    monkeypatch.setenv("OPENAI_API_KEY", "expanded-secret")
+    _write_config(
+        "auxiliary:\n"
+        "  vision:\n"
+        "    provider: openai\n"
+        "    model: gpt-4o\n"
+        "providers:\n"
+        "  openai:\n"
+        "    api_key: ${OPENAI_API_KEY}\n"
+        "metadata:\n"
+        "  keep: true\n"
+    )
+    monkeypatch.setattr(config, "reload_config", lambda: None)
+    result = config.set_auxiliary_model("vision", "openai", "gpt-5.4")
+    assert result.get("ok") is True
+    raw = config._load_yaml_config_file_raw(config._get_config_path())
+    assert raw["providers"]["openai"]["api_key"] == "${OPENAI_API_KEY}", (
+        "${VAR} reference was expanded — leaked secret into config.yaml"
+    )
+    assert raw["auxiliary"]["vision"]["model"] == "gpt-5.4"
+    assert raw["metadata"]["keep"] is True
+
+
 def test_set_max_tokens_invalid_non_empty_input_is_a_true_no_op(monkeypatch):
     import api.config as config
 

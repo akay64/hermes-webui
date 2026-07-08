@@ -185,7 +185,7 @@ def save_dashboard_config(payload: dict) -> dict:
     from api import config as webui_config
 
     config_path = webui_config._get_config_path()
-    config_data = webui_config._load_yaml_config_file(config_path)
+    config_data = webui_config._load_yaml_config_file_raw(config_path)
     webui_section = config_data.get("webui")
     if not isinstance(webui_section, dict):
         webui_section = {}

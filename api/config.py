@@ -3978,7 +3978,7 @@ def set_hermes_default_model(model_id: str, provider: str | None = None, advance
     # reload_config() acquires _cfg_lock internally (it's not reentrant) so
     # it must be called AFTER releasing the lock to avoid deadlock.
     with _cfg_lock:
-        config_data = _load_yaml_config_file(config_path)
+        config_data = _load_yaml_config_file_raw(config_path)
         model_cfg = config_data.get("model", {})
         if not isinstance(model_cfg, dict):
             model_cfg = {}
@@ -4142,7 +4142,7 @@ def set_auxiliary_model(task: str, provider: str, model: str, advanced: dict | N
         )
     config_path = _get_config_path()
     with _cfg_lock:
-        config_data = _load_yaml_config_file(config_path)
+        config_data = _load_yaml_config_file_raw(config_path)
 
         if task == "__reset__":
             # Per-slot reset: set each slot to auto, preserving extra fields
