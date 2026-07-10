@@ -12,6 +12,7 @@ import api.models as models
 from api.models import Session, reconciled_state_db_messages_for_session
 from api.routes import _handle_session_compress
 from api.session_recovery import inspect_session_recovery_status, recover_all_sessions_on_startup
+from tests._manual_compression_fakes import FakeSessionDB, make_db_backed_agent_class
 
 
 class _FakeHandler:
@@ -50,8 +51,12 @@ class _FakeAgent:
 
 
 def _install_fake_compression_runtime(monkeypatch, agent_cls):
+    import api.streaming as streaming
+
+    session_db = FakeSessionDB()
+    monkeypatch.setattr(streaming, "_build_session_db_for_stream", lambda path: session_db)
     fake_run_agent = types.ModuleType("run_agent")
-    fake_run_agent.AIAgent = agent_cls
+    fake_run_agent.AIAgent = make_db_backed_agent_class(agent_cls, session_db)
     monkeypatch.setitem(sys.modules, "run_agent", fake_run_agent)
 
     import api.config as _cfg
@@ -88,6 +93,7 @@ def _install_fake_compression_runtime(monkeypatch, agent_cls):
             "base_url": "https://api.openai.com/v1",
         },
     )
+    return session_db
 
 
 def _msg(role, content, ts):
