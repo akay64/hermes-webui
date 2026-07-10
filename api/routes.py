@@ -25269,6 +25269,7 @@ def _handle_mcp_server_delete(handler, name):
     if not name:
         return bad(handler, "name is required")
     cfg = get_config()
+    _snapshot = copy.deepcopy(cfg)
     servers = cfg.get("mcp_servers", {})
     if not isinstance(servers, dict):
         servers = {}
@@ -25277,7 +25278,7 @@ def _handle_mcp_server_delete(handler, name):
     del servers[name]
     cfg["mcp_servers"] = servers
     _save_yaml_config_file(_get_config_path(), cfg,
-        dirty_set={("mcp_servers",)})
+        snapshot=_snapshot)
     reload_config()
     return j(handler, {"ok": True, "deleted": name})
 
@@ -25336,6 +25337,7 @@ def _handle_mcp_server_update(handler, name, body):
     # Validate: must have url (http) or command (stdio)
     server_cfg = {}
     cfg = get_config()
+    _snapshot = copy.deepcopy(cfg)
     servers = cfg.get("mcp_servers", {})
     if not isinstance(servers, dict):
         servers = {}
@@ -25360,6 +25362,6 @@ def _handle_mcp_server_update(handler, name, body):
     servers[name] = server_cfg
     cfg["mcp_servers"] = servers
     _save_yaml_config_file(_get_config_path(), cfg,
-        dirty_set={("mcp_servers", name)})
+        snapshot=_snapshot)
     reload_config()
     return j(handler, {"ok": True, "server": _server_summary(name, server_cfg)})
