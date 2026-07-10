@@ -832,16 +832,35 @@ def _save_yaml_config_file(
     config_path: Path,
     config_data: dict,
     dirty_set: set[tuple[str, ...]] | None = None,
+    snapshot: dict | None = None,
 ) -> None:
-    # ── ARCHITECTURAL GUARD ──────────────────────────────────────────────
-    # Prevent ``${VAR}`` secret leaks: merge the caller's dict onto the raw
-    # (unexpanded) file. The caller explicitly declares which config paths
-    # it authored via ``dirty_set``; keys absent from the dirty set preserve
-    # their raw ``${VAR}`` reference.  This avoids the equality-based
-    # heuristic that could silently drop intentional writes (authored value
-    # happens to equal the env expansion) or leak expanded secrets (ambiguous
-    # provenance on list items).
-    if dirty_set is None:
+    """Write *config_data* to *config_path* via the architectural guard.
+
+    The guard prevents ``${VAR}`` secret leaks during read-modify-write
+    cycles.  Two mutually-exclusive modes control which paths are treated
+    as authored:
+
+    *snapshot* (preferred)
+        The pre-mutation expanded config dict (use ``copy.deepcopy()``
+        right after loading).  The sink calls ``_diff_config_paths()``
+        against the caller's *config_data* and produces exact leaf-path
+        dirty entries.  This is the safe default for every caller that
+        does load → mutate → save.
+
+    *dirty_set* (fallback — special cases only)
+        A set of path tuples explicitly declaring authorship.  Use this
+        only when the load pattern makes a snapshot unavailable (e.g.
+        onboarding loads raw YAML and treats every key as intentional).
+        Do NOT pass parent-section paths like ``("model",)`` —
+        ``${VAR}`` siblings under the same parent will be overwritten
+        with expanded secrets.
+
+    When both are provided, *snapshot* wins and *dirty_set* is derived
+    automatically.
+    """
+    if snapshot is not None:
+        dirty_set = _diff_config_paths(snapshot, config_data)
+    elif dirty_set is None:
         raise TypeError(
             "dirty_set is required. Callers must declare which config keys "
             "they authored so the guard can distinguish intentional writes "
@@ -869,6 +888,41 @@ def _save_yaml_config_file(
     # serve a stale dict (#4650 review) — evicting on our own write closes that gap.
     with _yaml_file_cache_lock:
         _yaml_file_cache.pop(str(config_path), None)
+
+
+# ── Config-diff utility ──────────────────────────────────────────────────
+
+
+def _diff_config_paths(
+    snapshot: dict,
+    modified: dict,
+    prefix: tuple[str, ...] = (),
+) -> set[tuple[str, ...]]:
+    """Return leaf-path tuples for every value that differs between two dicts.
+
+    Walks both dicts recursively so that changing ``model.openai_runtime``
+    yields ``{("model", "openai_runtime")}`` — not ``{("model",)}`` which
+    would mark the entire ``model`` branch as authored and potentially
+    overwrite untouched ``${VAR}`` fields like ``model.api_key``.
+    """
+    dirty: set[tuple[str, ...]] = set()
+    keys = set(list(snapshot.keys()) + list(modified.keys()))
+    for key in keys:
+        path = prefix + (key,)
+        if key not in snapshot:
+            dirty.add(path)
+        elif key not in modified:
+            dirty.add(path)
+        elif (
+            isinstance(snapshot[key], dict)
+            and isinstance(modified[key], dict)
+        ):
+            dirty |= _diff_config_paths(
+                snapshot[key], modified[key], path,
+            )
+        elif snapshot[key] != modified[key]:
+            dirty.add(path)
+    return dirty
 
 
 # Initial load
@@ -4495,6 +4549,7 @@ def set_hermes_default_model(model_id: str, provider: str | None = None, advance
     # it must be called AFTER releasing the lock to avoid deadlock.
     with _cfg_lock:
         config_data = _load_yaml_config_file(config_path)
+        _snapshot = copy.deepcopy(config_data)
         model_cfg = config_data.get("model", {})
         if not isinstance(model_cfg, dict):
             model_cfg = {}
@@ -4541,34 +4596,13 @@ def set_hermes_default_model(model_id: str, provider: str | None = None, advance
                 # stale base_url sent requests to the wrong host (#4728).
                 model_cfg.pop("base_url", None)
 
-        # Build the dirty set — only keys the caller explicitly authored.
-        # api_key and other ${VAR}-backed fields the user didn't touch
-        # stay in their raw form.
-        dirty: set[tuple[str, ...]] = {("model", "default")}
-        if persisted_provider:
-            dirty.add(("model", "provider"))
-        if "base_url" in model_cfg:
-            dirty.add(("model", "base_url"))
-        elif previous_provider and "base_url" not in model_cfg:
-            # base_url was explicitly deleted via pop() above
-            dirty.add(("model", "base_url"))
-
         _apply_advanced_model_options(model_cfg, advanced)
-        if advanced:
-            # advanced options were explicitly authored — dirty the whole
-            # model section since _apply_advanced_model_options may have
-            # set/popped api_key, timeout, extra_body, etc.
-            dirty.add(("model",))
-        elif not _main_model_supports_service_tier(persisted_model, persisted_provider):
+        if not _main_model_supports_service_tier(persisted_model, persisted_provider):
             model_cfg.pop("service_tier", None)
 
         config_data["model"] = model_cfg
-        if dirty == {("model",)}:
-            _save_yaml_config_file(config_path, config_data,
-                dirty_set={("model",)})
-        else:
-            _save_yaml_config_file(config_path, config_data,
-                dirty_set=dirty)
+        _save_yaml_config_file(config_path, config_data,
+            snapshot=_snapshot)
     # Reload outside the lock — reload_config() acquires _cfg_lock itself.
     reload_config()
     # Invalidate the TTL cache so the next /api/models call returns fresh data
@@ -4702,6 +4736,7 @@ def set_auxiliary_model(task: str, provider: str, model: str, advanced: dict | N
     config_path = _get_config_path()
     with _cfg_lock:
         config_data = _load_yaml_config_file(config_path)
+        _snapshot = copy.deepcopy(config_data)
         if task != "__reset__" and task not in AUX_TASK_SLOTS:
             raise ValueError(f"Unknown auxiliary task slot: {task!r}. Valid: {list(AUX_TASK_SLOTS)}")
         if task == "__reset__":
@@ -4731,17 +4766,11 @@ def set_auxiliary_model(task: str, provider: str, model: str, advanced: dict | N
                 slot_cfg = {}
             slot_cfg["provider"] = provider or "auto"
             slot_cfg["model"] = model or ""
-
-            dirty: set[tuple[str, ...]] = {
-                ("auxiliary", task, "provider"),
-                ("auxiliary", task, "model"),
-            }
             if provider and (provider.startswith("custom:") or provider == "custom"):
                 try:
                     _, _, resolved_base_url = resolve_model_provider(model)
                     if resolved_base_url:
                         slot_cfg["base_url"] = str(resolved_base_url).strip().rstrip("/")
-                        dirty.add(("auxiliary", task, "base_url"))
                 except Exception:
                     pass
             if advanced is not None:
@@ -4750,13 +4779,10 @@ def set_auxiliary_model(task: str, provider: str, model: str, advanced: dict | N
                 except ValueError as exc:
                     msg = str(exc).replace("advanced model options", "advanced auxiliary options")
                     raise ValueError(msg) from exc
-                # Advanced options were explicitly authored — dirty the
-                # whole slot since advanced may set api_key, timeout, etc.
-                dirty.add(("auxiliary", task))
             aux_cfg[task] = slot_cfg
             config_data["auxiliary"] = aux_cfg
             _save_yaml_config_file(config_path, config_data,
-                dirty_set=dirty)
+                snapshot=_snapshot)
 
     reload_config()
     return {"ok": True, "task": task, "provider": provider, "model": model}

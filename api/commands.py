@@ -224,38 +224,6 @@ def execute_agent_command(command: str) -> str:
     raise KeyError(canonical)
 
 
-def _diff_config_paths(
-    snapshot: dict,
-    modified: dict,
-    prefix: tuple[str, ...] = (),
-) -> set[tuple[str, ...]]:
-    """Return leaf-path tuples for every value that differs between two dicts.
-
-    Walks both dicts recursively so that changing ``model.openai_runtime``
-    yields ``{("model", "openai_runtime")}`` — not ``{("model",)}`` which
-    would mark the entire ``model`` branch as authored and potentially
-    overwrite untouched ``${VAR}`` fields like ``model.api_key``.
-    """
-    dirty: set[tuple[str, ...]] = set()
-    keys = set(list(snapshot.keys()) + list(modified.keys()))
-    for key in keys:
-        path = prefix + (key,)
-        if key not in snapshot:
-            dirty.add(path)  # new key added
-        elif key not in modified:
-            dirty.add(path)  # key deleted
-        elif (
-            isinstance(snapshot[key], dict)
-            and isinstance(modified[key], dict)
-        ):
-            dirty |= _diff_config_paths(
-                snapshot[key], modified[key], path,
-            )
-        elif snapshot[key] != modified[key]:
-            dirty.add(path)  # leaf value changed
-    return dirty
-
-
 def _run_codex_runtime_command(arg_string: str) -> str:
     """Execute Hermes' shared Codex runtime switch for the active profile."""
     try:
@@ -276,12 +244,10 @@ def _run_codex_runtime_command(arg_string: str) -> str:
             _snapshot = copy.deepcopy(active_config)
 
             def _persist_config(config_data: dict) -> None:
-                # Build dirty_set from leaf paths that changed under apply()
-                dirty = _diff_config_paths(_snapshot, config_data)
                 webui_config._save_yaml_config_file(
                     webui_config._get_config_path(),
                     config_data,
-                    dirty_set=dirty,
+                    snapshot=_snapshot,
                 )
                 webui_config.reload_config()
 
