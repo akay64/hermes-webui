@@ -138,6 +138,54 @@ def test_openrouter_group_uses_live_fetch_when_available(monkeypatch):
         "free pricing model must surface even without :free suffix"
 
 
+@pytest.mark.parametrize(
+    ("pricing", "case_name"),
+    [
+        ({}, "missing"),
+        ({"prompt": "0"}, "completion missing"),
+        ({"completion": "0"}, "prompt missing"),
+        ({"prompt": None, "completion": None}, "null"),
+        ({"prompt": "n/a", "completion": "0"}, "malformed"),
+    ],
+)
+def test_openrouter_free_tier_pricing_fails_closed(
+    monkeypatch,
+    pricing,
+    case_name,
+):
+    """Unknown pricing must not be presented as free without a :free ID."""
+    candidate_id = f"vendor/{case_name.replace(' ', '-')}-pricing"
+    explicit_free_id = "vendor/explicit-free:free"
+    fake_payload = _make_or_payload(
+        {"id": candidate_id, "name": case_name, "pricing": pricing},
+        {"id": explicit_free_id, "name": "Explicit Free", "pricing": pricing},
+    )
+
+    monkeypatch.setattr(
+        urllib.request,
+        "urlopen",
+        lambda *_args, **_kwargs: _FakeResponse(fake_payload),
+    )
+
+    from hermes_cli import models as hermes_models
+
+    monkeypatch.setattr(hermes_models, "fetch_openrouter_models", lambda **_kwargs: [])
+    monkeypatch.setattr(hermes_models, "provider_model_ids", lambda *_args, **_kwargs: [])
+
+    grouped = _get_grouped_models()
+    openrouter_group = next(
+        group for group in grouped if group.get("provider_id") == "openrouter"
+    )
+    model_ids = {
+        model["id"]
+        for bucket_name in ("models", "extra_models")
+        for model in openrouter_group.get(bucket_name, [])
+    }
+
+    assert candidate_id not in model_ids
+    assert explicit_free_id in model_ids
+
+
 def test_openrouter_falls_back_to_static_when_live_fails(monkeypatch):
     """If both hermes_cli.fetch and the direct urlopen raise, the picker
     must fall back to the hardcoded `_FALLBACK_MODELS` list — never empty."""
