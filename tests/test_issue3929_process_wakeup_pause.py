@@ -625,6 +625,59 @@ def test_process_wakeup_pause_keeps_pause_when_config_key_has_no_pool_evidence(t
     assert saved.process_wakeup_pause["suppressed_count"] == 1
 
 
+def test_process_wakeup_pause_keeps_pause_when_unusable_pool_entry_lacks_fingerprint(tmp_path, monkeypatch):
+    session = Session(
+        session_id="wakeup_pause_unusable_pool_entry_lacks_fingerprint",
+        workspace=str(tmp_path),
+        model="test-model",
+        model_provider="test-provider",
+    )
+    pause = models.record_process_wakeup_provider_unavailable_pause(
+        session,
+        classification="credential_pool_empty",
+        model="test-model",
+        provider="test-provider",
+    )
+    assert pause is not None
+    session.save()
+    models.SESSIONS[session.session_id] = session
+    monkeypatch.setattr(providers, "_get_provider_api_key", lambda _provider: "generic-config-key")
+    monkeypatch.setattr(
+        providers,
+        "_pool_entry_payloads",
+        lambda _provider: [{"last_status": "dead"}],
+    )
+    monkeypatch.setattr(
+        routes,
+        "provider_has_process_wakeup_recovery_credential",
+        providers.provider_has_process_wakeup_recovery_credential,
+    )
+
+    def _unexpected_start_run(*_args, **_kwargs):
+        raise AssertionError("unknown exhausted pool secret must not prove recovery")
+
+    monkeypatch.setattr(routes, "_resolve_chat_workspace_with_recovery", lambda _s, _w: str(tmp_path))
+    monkeypatch.setattr(routes, "_read_profile_model_config", lambda _s, _p: (None, None, {}))
+    monkeypatch.setattr(
+        routes,
+        "_resolve_compatible_session_model_state",
+        lambda *_args, **_kwargs: ("test-model", "test-provider", False),
+    )
+    monkeypatch.setattr(routes, "_start_run", _unexpected_start_run)
+
+    response = routes.start_session_turn(
+        session.session_id,
+        "[IMPORTANT: Background process completed with unknown exhausted pool key.]",
+        source="process_wakeup",
+    )
+
+    assert response["_status"] == 409
+    assert response["error"] == PROCESS_WAKEUP_PAUSE_ERROR
+    saved = Session.load(session.session_id)
+    assert saved is not None
+    assert saved.process_wakeup_pause["suppressed_count"] == 1
+
+
 def test_process_wakeup_pause_clears_when_config_key_differs_from_exhausted_pool_secret(tmp_path, monkeypatch):
     session = Session(
         session_id="wakeup_pause_config_key_differs_from_exhausted_pool",
