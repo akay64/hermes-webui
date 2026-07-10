@@ -792,28 +792,36 @@ def _deep_merge_onto_raw(
                 and isinstance(raw[key], list)
                 and isinstance(expanded_raw[key], list)
             ):
-                # Compare lists element by element so changing one item
-                # doesn't leak expanded ${VAR} references from others.
+                # Match by value, not by index — handles insert/delete shifts
+                # without leaking expanded ${VAR} references from shifted
+                # list positions.
                 merged_list: list = []
-                for idx, u_item in enumerate(value):
-                    if idx < len(raw[key]):
-                        r_item = raw[key][idx]
-                        e_item = expanded_raw[key][idx]
-                        if (
-                            isinstance(u_item, dict)
-                            and isinstance(r_item, dict)
-                            and isinstance(e_item, dict)
-                        ):
-                            merged_list.append(_deep_merge_onto_raw(
-                                r_item, e_item, u_item,
-                            ))
-                        elif e_item == u_item:
-                            # Unchanged — preserve raw reference
-                            merged_list.append(r_item)
-                        else:
-                            merged_list.append(u_item)
-                    else:
-                        # New items beyond the raw list length
+                seen_indices: set = set()
+                for u_item in value:
+                    matched = False
+                    for i, (e_item, r_item) in enumerate(
+                        zip(expanded_raw[key], raw[key])
+                    ):
+                        if i in seen_indices:
+                            continue
+                        if isinstance(u_item, dict) and isinstance(e_item, dict) and isinstance(r_item, dict):
+                            if e_item == u_item:
+                                merged_list.append(
+                                    _deep_merge_onto_raw(
+                                        r_item, e_item, u_item,
+                                    )
+                                )
+                                seen_indices.add(i)
+                                matched = True
+                                break
+                        elif not isinstance(u_item, dict) and not isinstance(e_item, dict) and not isinstance(r_item, dict):
+                            if e_item == u_item:
+                                # Unchanged — preserve raw reference
+                                merged_list.append(r_item)
+                                seen_indices.add(i)
+                                matched = True
+                                break
+                    if not matched:
                         merged_list.append(u_item)
                 merged[key] = merged_list
             elif expanded_raw[key] == value:
