@@ -23924,7 +23924,13 @@ def _handle_session_compress(handler, body):
         return bad(handler, "Session is still streaming; wait for the current turn to finish.", 409)
 
     try:
-        from api.streaming import _sanitize_messages_for_api
+        from api.streaming import (
+            _build_session_db_for_stream,
+            _sanitize_messages_for_api,
+            _stamp_missing_message_timestamps,
+            _webui_ephemeral_system_prompt,
+            _webui_workspace_system_message,
+        )
 
         messages = _sanitize_messages_for_api(s.messages)
         if len(messages) < 4:
@@ -24036,10 +24042,11 @@ def _handle_session_compress(handler, body):
         if not resolved_api_key:
             return bad(handler, "No provider configured -- cannot compress.")
 
-        # Compute compression *outside* the lock — the LLM round-trip can take
-        # many seconds and we must not block cancel_stream or other writers.
-        # Lock contract: hold for the in-memory mutation only, never across
-        # network I/O.
+        # The DB-aware lifecycle must run while the per-session lock is held.
+        # This intentionally serializes the manual compression job with other
+        # transcript writers: allowing a new turn to start while the summary is
+        # being generated would make the eventual archive operate on a stale
+        # sidecar snapshot.
         original_messages = list(messages)
         original_stream_state = (
             getattr(s, "active_stream_id", None),
@@ -24047,81 +24054,171 @@ def _handle_session_compress(handler, body):
             copy.deepcopy(getattr(s, "pending_attachments", None)),
             getattr(s, "pending_started_at", None),
         )
-        approx_tokens = _estimate_messages_tokens_rough(original_messages)
 
-        agent = _run_agent.AIAgent(
-            model=resolved_model,
-            provider=resolved_provider,
-            base_url=resolved_base_url,
-            api_key=resolved_api_key,
-            # Identify browser-originated sessions as WebUI so Hermes Agent
-            # does not inject CLI-specific terminal/output guidance.
-            platform="webui",
-            quiet_mode=True,
-            enabled_toolsets=_resolve_cli_toolsets(),
-            session_id=sid,
-        )
-        compressed = agent.context_compressor.compress(
-            original_messages,
-            current_tokens=approx_tokens,
-            focus_topic=focus_topic,
-        )
-        new_tokens = _estimate_messages_tokens_rough(compressed)
-        summary = _summarize_manual_compression(
-            original_messages,
-            compressed,
-            approx_tokens,
-            new_tokens,
-            focus_topic=focus_topic,
-        )
-
-        with _cfg._get_session_agent_lock(sid):
-            # Re-read messages to detect concurrent edits during the LLM call.
-            # If the history changed, the compression result is stale — abort.
+        def _assert_session_unchanged():
+            """Abort before DB archival if the compression snapshot is stale."""
+            latest = get_session(sid)
             current_stream_state = (
-                getattr(s, "active_stream_id", None),
-                getattr(s, "pending_user_message", None),
-                copy.deepcopy(getattr(s, "pending_attachments", None)),
-                getattr(s, "pending_started_at", None),
+                getattr(latest, "active_stream_id", None),
+                getattr(latest, "pending_user_message", None),
+                copy.deepcopy(getattr(latest, "pending_attachments", None)),
+                getattr(latest, "pending_started_at", None),
             )
             if current_stream_state != original_stream_state:
-                return bad(handler, "Session stream state changed during compression; please retry.", 409)
-            if _sanitize_messages_for_api(s.messages) != original_messages:
-                return bad(handler, "Session was modified during compression; please retry.", 409)
+                raise RuntimeError("Session stream state changed during compression; please retry.")
+            if _sanitize_messages_for_api(latest.messages) != original_messages:
+                raise RuntimeError("Session was modified during compression; please retry.")
 
-            from api.session_ops import _truncation_watermark_for
-            from api.streaming import _stamp_missing_message_timestamps
+        from api.models import _get_profile_home
 
-            compressed_copy = copy.deepcopy(compressed)
-            _stamp_missing_message_timestamps(compressed_copy)
-            s.context_messages = compressed_copy
-            s.active_stream_id = None
-            s.pending_user_message = None
-            s.pending_attachments = []
-            s.pending_started_at = None
-            s.pending_user_source = None
-            visible_after = visible_messages_for_anchor(s.messages, auto_compression=False)
-            s.compression_anchor_visible_idx = max(0, len(visible_after) - 1) if visible_after else None
-            s.compression_anchor_message_key = _anchor_message_key(visible_after[-1]) if visible_after else None
-            summary_text = None
-            if isinstance(summary, dict):
-                summary_text = summary.get("reference_message") or summary.get("token_line") or summary.get("headline")
-            s.compression_anchor_summary = _compact_summary_text(
-                summary_text or _compression_summary_from_messages(compressed) or ""
+        profile_home = _get_profile_home(getattr(s, "profile", None))
+        session_db = _build_session_db_for_stream(profile_home / "state.db")
+        if session_db is None:
+            return bad(handler, "Session database unavailable; compression was not applied.", 503)
+
+        agent = None
+        try:
+            agent = _run_agent.AIAgent(
+                model=resolved_model,
+                provider=resolved_provider,
+                base_url=resolved_base_url,
+                api_key=resolved_api_key,
+                # Identify browser-originated sessions as WebUI so Hermes Agent
+                # does not inject CLI-specific terminal/output guidance.
+                platform="webui",
+                quiet_mode=True,
+                enabled_toolsets=_resolve_cli_toolsets(),
+                session_id=sid,
+                session_db=session_db,
             )
-            # Persist an intentional-shrink boundary so append-only state.db
-            # reconciliation does not replay pre-compression rows (#4836).
-            compress_watermark = _truncation_watermark_for(compressed_copy)
-            s.truncation_watermark = compress_watermark
-            s.truncation_boundary = compress_watermark
-            s.compression_anchor_mode = "manual"
-            s.last_prompt_tokens = new_tokens
-            s.save()
-            # Drop stale backups that would undo an intentional manual compress.
+            if not getattr(agent, "compression_in_place", False):
+                return bad(
+                    handler,
+                    "WebUI manual compression requires compression.in_place=true.",
+                    409,
+                )
+            agent.ephemeral_system_prompt = _webui_ephemeral_system_prompt(
+                None,
+                surface_context={
+                    "source": "webui",
+                    "session_id": sid,
+                    "profile": getattr(s, "profile", None),
+                    "workspace": s.workspace,
+                },
+                config_data=_cfg.get_config_for_profile_home(profile_home),
+            )
+
+            def _compression_before_db_commit():
+                try:
+                    _assert_session_unchanged()
+                except RuntimeError as exc:
+                    agent._last_compaction_guard_error = str(exc)
+                    raise
+
+            agent._compression_before_db_commit = _compression_before_db_commit
+
+            with _cfg._get_session_agent_lock(sid):
+                # Re-read the session while holding the lock. If the history
+                # changed since the request was accepted, the summary is stale
+                # and must not be committed to state.db or the sidecar.
+                s = get_session(sid)
+                try:
+                    _assert_session_unchanged()
+                except RuntimeError as exc:
+                    return bad(handler, str(exc), 409)
+
+                # Ensure the WebUI session has a durable row before asking the
+                # agent to archive it. Existing sessions created before the
+                # WebUI SessionDB bridge may have no active rows; seed those
+                # once from the sidecar, but never seed over archived history.
+                agent._ensure_db_session()
+                if not getattr(agent, "_session_db_created", False):
+                    return bad(handler, "Session database unavailable; compression was not applied.", 503)
+                active_db_messages = session_db.get_messages(sid)
+                if not active_db_messages:
+                    if session_db.has_archived_messages(sid):
+                        return bad(
+                            handler,
+                            "Session database has no active context; compression was not applied.",
+                            409,
+                        )
+                    agent._flush_messages_to_session_db(original_messages, [])
+                    active_db_messages = session_db.get_messages(sid)
+                if not active_db_messages:
+                    return bad(handler, "Session database has no active context; compression was not applied.", 503)
+
+                compression_messages = _sanitize_messages_for_api(active_db_messages)
+                if len(compression_messages) < 4:
+                    return bad(handler, "Not enough active context to compress (need at least 4 messages).")
+                compression_approx_tokens = _estimate_messages_tokens_rough(compression_messages)
+
+                compressed, _new_system_prompt = agent._compress_context(
+                    compression_messages,
+                    _webui_workspace_system_message(s.workspace),
+                    approx_tokens=compression_approx_tokens,
+                    task_id=sid,
+                    focus_topic=focus_topic,
+                    force=True,
+                )
+                if getattr(agent.context_compressor, "_last_compress_aborted", False):
+                    return bad(
+                        handler,
+                        "Compression summary failed; no messages were changed. Please retry.",
+                        409,
+                    )
+                if getattr(agent, "_last_compaction_guard_error", None):
+                    return bad(handler, str(agent._last_compaction_guard_error), 409)
+                if getattr(agent, "_last_compaction_db_error", None):
+                    return bad(handler, "Session database commit failed; no sidecar changes were applied.", 503)
+                if not getattr(agent, "_last_compaction_in_place", False):
+                    return bad(handler, "Compression was not durably committed; no sidecar changes were applied.", 409)
+
+                new_tokens = _estimate_messages_tokens_rough(compressed)
+                summary = _summarize_manual_compression(
+                    compression_messages,
+                    compressed,
+                    compression_approx_tokens,
+                    new_tokens,
+                    focus_topic=focus_topic,
+                )
+
+                from api.session_ops import _truncation_watermark_for
+
+                compressed_copy = copy.deepcopy(compressed)
+                _stamp_missing_message_timestamps(compressed_copy)
+                s.context_messages = compressed_copy
+                s.active_stream_id = None
+                s.pending_user_message = None
+                s.pending_attachments = []
+                s.pending_started_at = None
+                s.pending_user_source = None
+                visible_after = visible_messages_for_anchor(s.messages, auto_compression=False)
+                s.compression_anchor_visible_idx = max(0, len(visible_after) - 1) if visible_after else None
+                s.compression_anchor_message_key = _anchor_message_key(visible_after[-1]) if visible_after else None
+                summary_text = None
+                if isinstance(summary, dict):
+                    summary_text = summary.get("reference_message") or summary.get("token_line") or summary.get("headline")
+                s.compression_anchor_summary = _compact_summary_text(
+                    summary_text or _compression_summary_from_messages(compressed) or ""
+                )
+                # Persist an intentional-shrink boundary so append-only state.db
+                # reconciliation does not replay pre-compression rows (#4836).
+                compress_watermark = _truncation_watermark_for(compressed_copy)
+                s.truncation_watermark = compress_watermark
+                s.truncation_boundary = compress_watermark
+                s.compression_anchor_mode = "manual"
+                s.last_prompt_tokens = new_tokens
+                s.save()
+                # Drop stale backups that would undo an intentional manual compress.
+                try:
+                    s.path.with_suffix(".json.bak").unlink(missing_ok=True)
+                except OSError:
+                    pass
+        finally:
             try:
-                s.path.with_suffix(".json.bak").unlink(missing_ok=True)
-            except OSError:
-                pass
+                session_db.close()
+            except Exception:
+                logger.debug("Failed to close manual compression SessionDB", exc_info=True)
 
         session_payload = redact_session_data(
             s.compact() | {

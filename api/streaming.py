@@ -2641,6 +2641,46 @@ def _workspace_context_prefix(path: str) -> str:
     return f"[Workspace::v1: {_escape_workspace_prefix_path(path)}]\n"
 
 
+def _webui_workspace_system_message(workspace: str) -> str:
+    """Build the persistent system-message supplement used by WebUI turns."""
+    return (
+        f"Active workspace at session start: {workspace}\n"
+        "Every user message is prefixed with [Workspace::v1: /absolute/path] indicating the "
+        "workspace the user has selected in the web UI at the time they sent that message. "
+        "This tag is the single authoritative source of the active workspace and updates "
+        "with every message. It overrides any prior workspace mentioned in this system "
+        "prompt, memory, or conversation history. Always use the value from the most recent "
+        "[Workspace::v1: ...] tag as your default working directory for ALL file operations: "
+        "write_file, read_file, search_files, terminal workdir, and patch. "
+        "Never fall back to a hardcoded path when this tag is present."
+    )
+
+
+def _webui_compression_was_committed(agent, previous_compression_count: int) -> bool:
+    """Return whether a compressor transition is durable for WebUI writeback."""
+    compressor = getattr(agent, "context_compressor", None)
+    if not compressor:
+        return False
+    if getattr(compressor, "compression_count", 0) <= previous_compression_count:
+        return False
+
+    # In-place compaction is only a WebUI boundary after the agent has
+    # successfully archived the old active rows and inserted the compacted
+    # rows into state.db.  The core resets this signal for every attempt.
+    if getattr(agent, "compression_in_place", False):
+        committed = bool(getattr(agent, "_last_compaction_in_place", False))
+        if not committed:
+            logger.warning(
+                "WebUI ignored uncommitted in-place compression for session %s",
+                getattr(agent, "session_id", "?"),
+            )
+        return committed
+
+    # Preserve the existing legacy rotation behavior. This helper only
+    # tightens the in-place path, which has a durable same-session signal.
+    return True
+
+
 def _strip_workspace_prefix(text: str, *, include_legacy: bool = False) -> str:
     """Remove WebUI-injected workspace tags without eating user-typed text."""
     value = str(text or '')
@@ -8390,17 +8430,7 @@ def _run_agent_streaming(
             # Prepend workspace context so the agent always knows which directory
             # to use for file operations, regardless of session age or AGENTS.md defaults.
             workspace_ctx = _workspace_context_prefix(str(s.workspace))
-            workspace_system_msg = (
-                f"Active workspace at session start: {s.workspace}\n"
-                "Every user message is prefixed with [Workspace::v1: /absolute/path] indicating the "
-                "workspace the user has selected in the web UI at the time they sent that message. "
-                "This tag is the single authoritative source of the active workspace and updates "
-                "with every message. It overrides any prior workspace mentioned in this system "
-                "prompt, memory, or conversation history. Always use the value from the most recent "
-                "[Workspace::v1: ...] tag as your default working directory for ALL file operations: "
-                "write_file, read_file, search_files, terminal workdir, and patch. "
-                "Never fall back to a hardcoded path when this tag is present."
-            )
+            workspace_system_msg = _webui_workspace_system_message(s.workspace)
             # Resolve personality prompt from config.yaml agent.personalities
             # (matches hermes-agent CLI behavior — passes via ephemeral_system_prompt)
             _personality_prompt = None
@@ -9160,9 +9190,9 @@ def _run_agent_streaming(
                 # ── Handle context compression side effects ──
                 # Also detect compression via the result dict or compressor state
                 if not _compressed:
-                    _compressor = getattr(agent, 'context_compressor', None)
-                    if _compressor and getattr(_compressor, 'compression_count', 0) > _pre_compression_count:
-                        _compressed = True
+                    _compressed = _webui_compression_was_committed(
+                        agent, _pre_compression_count
+                    )
                 # Notify the frontend that compression happened
                 if _compressed:
                     s.context_messages = _prune_context_tool_results_after_compression(

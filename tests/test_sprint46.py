@@ -15,6 +15,7 @@ from api.models import Session
 from api.config import SESSION_DIR
 from api.routes import _handle_session_compress, get_session
 from tests._pytest_port import BASE
+from tests._manual_compression_fakes import FakeSessionDB, make_db_backed_agent_class
 
 
 class _FakeHandler:
@@ -63,8 +64,12 @@ class _FakeAgent:
 
 
 def _install_fake_compression_runtime(monkeypatch, agent_cls):
+    import api.streaming as streaming
+
+    session_db = FakeSessionDB()
+    monkeypatch.setattr(streaming, "_build_session_db_for_stream", lambda path: session_db)
     fake_run_agent = types.ModuleType("run_agent")
-    fake_run_agent.AIAgent = agent_cls
+    fake_run_agent.AIAgent = make_db_backed_agent_class(agent_cls, session_db)
     monkeypatch.setitem(sys.modules, "run_agent", fake_run_agent)
 
     import api.config as _cfg
@@ -100,6 +105,7 @@ def _install_fake_compression_runtime(monkeypatch, agent_cls):
             "base_url": "https://api.openai.com/v1",
         },
     )
+    return session_db
 
 
 def _make_session(messages=None, tool_calls=None):
@@ -194,6 +200,111 @@ def test_session_compress_roundtrip(monkeypatch, cleanup_test_sessions):
     assert persisted.compression_anchor_message_key == payload["session"]["compression_anchor_message_key"]
     assert _FakeAgent.last_instance is not None
     assert _FakeAgent.last_instance.context_compressor.calls[0]["focus_topic"] == "database schema"
+
+
+def test_session_compress_archives_active_db_before_sidecar_update(monkeypatch, cleanup_test_sessions):
+    original_messages = [
+        {"role": "user", "content": "one"},
+        {"role": "assistant", "content": "two"},
+        {"role": "user", "content": "three"},
+        {"role": "assistant", "content": "four"},
+    ]
+    sid = _make_session(original_messages)
+    cleanup_test_sessions.append(sid)
+
+    session_db = _install_fake_compression_runtime(monkeypatch, _FakeAgent)
+    handler = _FakeHandler()
+    _handle_session_compress(handler, {"session_id": sid})
+
+    assert handler.status == 200
+    assert session_db.archive_calls == 1
+    assert [m["content"] for m in session_db.archived[sid]] == [
+        "one",
+        "two",
+        "three",
+        "four",
+    ]
+    assert [m["content"] for m in session_db.active[sid]] == ["one", "four"]
+    loaded = Session.load(sid)
+    assert [m["content"] for m in loaded.context_messages] == ["one", "four"]
+
+
+def test_session_compress_summary_abort_leaves_db_and_sidecar_unchanged(
+    monkeypatch, cleanup_test_sessions
+):
+    class AbortingCompressor:
+        def __init__(self):
+            self._last_compress_aborted = False
+            self._last_summary_error = None
+
+        def compress(self, messages, current_tokens=None, focus_topic=None):
+            self._last_compress_aborted = True
+            self._last_summary_error = "summary provider unavailable"
+            return list(messages)
+
+    class AbortingAgent:
+        def __init__(self, **kwargs):
+            self.context_compressor = AbortingCompressor()
+
+    original_messages = [
+        {"role": "user", "content": "one"},
+        {"role": "assistant", "content": "two"},
+        {"role": "user", "content": "three"},
+        {"role": "assistant", "content": "four"},
+    ]
+    sid = _make_session(original_messages)
+    cleanup_test_sessions.append(sid)
+    before_context = Session.load(sid).context_messages
+    session_db = _install_fake_compression_runtime(monkeypatch, AbortingAgent)
+
+    handler = _FakeHandler()
+    _handle_session_compress(handler, {"session_id": sid})
+
+    assert handler.status == 409
+    assert session_db.archive_calls == 0
+    assert session_db.archived.get(sid, []) == []
+    assert [m["content"] for m in session_db.active[sid]] == [
+        "one",
+        "two",
+        "three",
+        "four",
+    ]
+    loaded = Session.load(sid)
+    assert loaded.messages == original_messages
+    assert loaded.context_messages == before_context
+
+
+def test_session_compress_db_failure_leaves_sidecar_unchanged(monkeypatch, cleanup_test_sessions):
+    original_messages = [
+        {"role": "user", "content": "one"},
+        {"role": "assistant", "content": "two"},
+        {"role": "user", "content": "three"},
+        {"role": "assistant", "content": "four"},
+    ]
+    sid = _make_session(original_messages)
+    cleanup_test_sessions.append(sid)
+    before_context = Session.load(sid).context_messages
+    session_db = _install_fake_compression_runtime(monkeypatch, _FakeAgent)
+
+    def fail_archive(*args, **kwargs):
+        raise RuntimeError("state.db is unavailable")
+
+    monkeypatch.setattr(session_db, "archive_and_compact", fail_archive)
+    handler = _FakeHandler()
+    _handle_session_compress(handler, {"session_id": sid})
+
+    assert handler.status == 503
+    assert session_db.archive_calls == 0
+    assert session_db.archived.get(sid, []) == []
+    assert [m["content"] for m in session_db.active[sid]] == [
+        "one",
+        "two",
+        "three",
+        "four",
+    ]
+    loaded = Session.load(sid)
+    assert loaded.messages == original_messages
+    assert loaded.context_messages == before_context
 
 
 def test_session_compress_start_is_async_and_reuses_running_job(monkeypatch, cleanup_test_sessions):
