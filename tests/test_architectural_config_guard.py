@@ -169,5 +169,67 @@ class TestArchitecturalConfigGuard:
         models = saved.get("models", [])
         assert len(models) == 1, f"Expected 1 model, got {len(models)}: {models}"
         assert "${TOKEN_B}" in str(models[0]), (
-            f"Expected ${{TOKEN_B}} at shifted position, got: {models[0]!r}"
+            f"Expected ${TOKEN_B} at shifted position, got: {models[0]!r}"
+        )
+
+    def test_dict_in_list_env_var_survives_field_change(self, tmp_path, monkeypatch):
+        """A ``${VAR}`` inside a dict list item is preserved when the caller
+        changes another field in the same item. Without the fix, the whole-
+        item equality check (e_item == u_item) fails after any field change,
+        so the caller's expanded dict — with literal secrets in untouched
+        fields — is appended as-is."""
+        import api.config as config
+
+        monkeypatch.setenv("TOKEN_NAME", "my-token")
+        monkeypatch.setenv("TOKEN_SECRET", "tp_secret_value")
+
+        config_path = tmp_path / "config.yaml"
+        monkeypatch.setattr(config, "_get_config_path", lambda: config_path)
+        monkeypatch.setattr(config, "reload_config", lambda: None)
+
+        config_path.write_text(
+            "\n".join([
+                "mcp_servers:",
+                "  - name: ${TOKEN_NAME}",
+                "    token: ${TOKEN_SECRET}",
+                "    url: https://api.example.com",
+                "    timeout: 30",
+            ]),
+            encoding="utf-8",
+        )
+
+        # Wipe caches
+        config._yaml_file_cache.clear()
+        _orig_cache = config._cfg_cache
+        config._cfg_cache = None
+
+        # Load expanded, change ONE field (name), save
+        expanded = config._load_yaml_config_file(config_path)
+        expanded["mcp_servers"][0]["name"] = "renamed"
+        config._save_yaml_config_file(config_path, expanded)
+
+        config._cfg_cache = _orig_cache
+
+        # Read back raw
+        saved = config._load_yaml_config_file_raw(config_path, _copy=False)
+        servers = saved.get("mcp_servers", [])
+        assert len(servers) == 1, f"Expected 1 server, got {len(servers)}"
+        item = servers[0]
+
+        # The changed field uses the caller's value
+        assert item.get("name") == "renamed", (
+            f"Expected name='renamed', got {item.get('name')!r}"
+        )
+
+        # Untouched fields with ${VAR} references must be preserved
+        assert "${TOKEN_SECRET}" in str(item.get("token", "")), (
+            f"Expected ${{TOKEN_SECRET}} in token, got: {item.get('token')!r}"
+        )
+
+        # Plain-value fields must survive unchanged
+        assert item.get("url") == "https://api.example.com", (
+            f"Expected url unchanged, got {item.get('url')!r}"
+        )
+        assert item.get("timeout") == 30, (
+            f"Expected timeout=30, got {item.get('timeout')!r}"
         )
