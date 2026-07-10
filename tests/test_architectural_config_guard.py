@@ -354,20 +354,20 @@ class TestDiffConfigPaths:
     """``_diff_config_paths`` identifies leaf-level paths that changed."""
 
     def test_no_changes_returns_empty(self):
-        from api.commands import _diff_config_paths
+        from api.config import _diff_config_paths
 
         cfg = {"model": {"provider": "openai", "default": "gpt-4o"}}
         assert _diff_config_paths(cfg, cfg) == set()
 
     def test_scalar_changed(self):
-        from api.commands import _diff_config_paths
+        from api.config import _diff_config_paths
 
         old = {"model": {"default": "gpt-4o"}}
         new = {"model": {"default": "claude-opus-4"}}
         assert _diff_config_paths(old, new) == {("model", "default")}
 
     def test_nested_leaf_changed(self):
-        from api.commands import _diff_config_paths
+        from api.config import _diff_config_paths
 
         old = {"model": {"openai_runtime": "auto", "api_key": "${KEY}"}}
         new = {"model": {"openai_runtime": "codex_app_server", "api_key": "${KEY}"}}
@@ -375,21 +375,21 @@ class TestDiffConfigPaths:
         assert _diff_config_paths(old, new) == {("model", "openai_runtime")}
 
     def test_key_added(self):
-        from api.commands import _diff_config_paths
+        from api.config import _diff_config_paths
 
         old = {"model": {"default": "gpt-4o"}}
         new = {"model": {"default": "gpt-4o", "provider": "openai"}}
         assert _diff_config_paths(old, new) == {("model", "provider")}
 
     def test_key_deleted(self):
-        from api.commands import _diff_config_paths
+        from api.config import _diff_config_paths
 
         old = {"model": {"default": "gpt-4o", "provider": "openai"}}
         new = {"model": {"default": "gpt-4o"}}
         assert _diff_config_paths(old, new) == {("model", "provider")}
 
     def test_multiple_changes(self):
-        from api.commands import _diff_config_paths
+        from api.config import _diff_config_paths
 
         old = {"a": 1, "b": {"c": 2, "d": 3}, "e": 4}
         new = {"a": 1, "b": {"c": 99, "d": 3}, "e": 5}
@@ -397,6 +397,223 @@ class TestDiffConfigPaths:
         assert result == {("b", "c"), ("e",)}
 
     def test_both_empty_returns_empty(self):
-        from api.commands import _diff_config_paths
+        from api.config import _diff_config_paths
 
         assert _diff_config_paths({}, {}) == set()
+
+
+class TestProductionCallerRegression:
+    """Verify each fixed production caller preserves ``${VAR}`` and writes
+    authored fields correctly."""
+
+    def test_set_model_with_advanced_preserves_unrelated_var(self, tmp_path, monkeypatch):
+        """``set_hermes_default_model`` with advanced options: authored field
+        persists, unrelated ``${VAR}`` sibling stays raw."""
+        import api.config as config
+
+        monkeypatch.setenv("MODEL_KEY", "sk-secret")
+
+        config_path = tmp_path / "config.yaml"
+        monkeypatch.setattr(config, "_get_config_path", lambda: config_path)
+        monkeypatch.setattr(config, "reload_config", lambda: None)
+
+        config_path.write_text(
+            "\n".join([
+                "model:",
+                "  default: claude-opus-4",
+                "  api_key: ${MODEL_KEY}",
+            ]),
+            encoding="utf-8",
+        )
+        config._yaml_file_cache.clear()
+        _orig_cache = config._cfg_cache
+        config._cfg_cache = None
+
+        # Load expanded, call set_hermes_default_model with advanced timeout
+        config.set_hermes_default_model("gpt-4o", advanced={"timeout": 60})
+
+        config._cfg_cache = _orig_cache
+
+        saved = config._load_yaml_config_file_raw(config_path, _copy=False)
+        model = saved.get("model", {})
+
+        # Authored field persists
+        assert model.get("default") == "gpt-4o", (
+            f"Expected default=gpt-4o, got {model.get('default')!r}"
+        )
+        # Unrelated ${VAR} sibling stays raw
+        assert "${MODEL_KEY}" in str(model.get("api_key", "")), (
+            f"Expected ${{MODEL_KEY}} in api_key, got {model.get('api_key')!r}"
+        )
+        # Advanced field is written
+        assert model.get("timeout") == 60, (
+            f"Expected timeout=60, got {model.get('timeout')!r}"
+        )
+
+    def test_set_aux_with_advanced_preserves_unrelated_var(self, tmp_path, monkeypatch):
+        """``set_auxiliary_model`` with advanced options: authored fields
+        persist, unrelated ``${VAR}`` in same slot stays raw."""
+        import api.config as config
+
+        monkeypatch.setenv("AUX_KEY", "sk-aux-secret")
+
+        config_path = tmp_path / "config.yaml"
+        monkeypatch.setattr(config, "_get_config_path", lambda: config_path)
+        monkeypatch.setattr(config, "reload_config", lambda: None)
+
+        config_path.write_text(
+            "\n".join([
+                "auxiliary:",
+                "  vision:",
+                "    provider: auto",
+                "    api_key: ${AUX_KEY}",
+            ]),
+            encoding="utf-8",
+        )
+        config._yaml_file_cache.clear()
+        _orig_cache = config._cfg_cache
+        config._cfg_cache = None
+
+        config.set_auxiliary_model("vision", "openai", "gpt-4o",
+            advanced={"timeout": 30})
+
+        config._cfg_cache = _orig_cache
+
+        saved = config._load_yaml_config_file_raw(config_path, _copy=False)
+        slot = saved.get("auxiliary", {}).get("vision", {})
+
+        # Authored fields persist
+        assert slot.get("provider") == "openai", (
+            f"Expected provider=openai, got {slot.get('provider')!r}"
+        )
+        assert slot.get("model") == "gpt-4o", (
+            f"Expected model=gpt-4o, got {slot.get('model')!r}"
+        )
+        # Unrelated ${VAR} sibling stays raw
+        assert "${AUX_KEY}" in str(slot.get("api_key", "")), (
+            f"Expected ${{AUX_KEY}} in api_key, got {slot.get('api_key')!r}"
+        )
+        # Advanced field is written
+        assert slot.get("timeout") == 30, (
+            f"Expected timeout=30, got {slot.get('timeout')!r}"
+        )
+
+    def test_mcp_delete_preserves_other_server_vars(self, tmp_path, monkeypatch):
+        """MCP server delete: deleting one server preserves ``${VAR}``
+        in other servers."""
+        import api.config as config
+        from copy import deepcopy
+
+        monkeypatch.setenv("SRV_A_KEY", "key-a")
+        monkeypatch.setenv("SRV_B_KEY", "key-b")
+
+        config_path = tmp_path / "config.yaml"
+        monkeypatch.setattr(config, "_get_config_path", lambda: config_path)
+        monkeypatch.setattr(config, "reload_config", lambda: None)
+
+        config_path.write_text(
+            "\n".join([
+                "mcp_servers:",
+                "  srv-a:",
+                "    url: https://a.example.com",
+                "    api_key: ${SRV_A_KEY}",
+                "  srv-b:",
+                "    url: https://b.example.com",
+                "    api_key: ${SRV_B_KEY}",
+            ]),
+            encoding="utf-8",
+        )
+        config._yaml_file_cache.clear()
+
+        # Load expanded, capture snapshot, delete srv-a, save via snapshot
+        cfg = config._load_yaml_config_file(config_path)
+        _snapshot = deepcopy(cfg)
+        del cfg["mcp_servers"]["srv-a"]
+        config._save_yaml_config_file(config_path, cfg, snapshot=_snapshot)
+
+        saved = config._load_yaml_config_file_raw(config_path, _copy=False)
+        servers = saved.get("mcp_servers", {})
+
+        # srv-a was deleted
+        assert "srv-a" not in servers
+
+        # srv-b's ${VAR} is preserved
+        srv_b = servers.get("srv-b", {})
+        assert "${SRV_B_KEY}" in str(srv_b.get("api_key", "")), (
+            f"Expected ${{SRV_B_KEY}} in srv-b, got {srv_b.get('api_key')!r}"
+        )
+        assert srv_b.get("url") == "https://b.example.com"
+
+    def test_mcp_update_uses_leaf_dirty_path(self, tmp_path, monkeypatch):
+        """MCP server update: changing one field preserves ``${VAR}``
+        in other fields of the same server."""
+        import api.config as config
+        from copy import deepcopy
+
+        monkeypatch.setenv("SRV_KEY", "sk-srv-secret")
+
+        config_path = tmp_path / "config.yaml"
+        monkeypatch.setattr(config, "_get_config_path", lambda: config_path)
+        monkeypatch.setattr(config, "reload_config", lambda: None)
+
+        config_path.write_text(
+            "\n".join([
+                "mcp_servers:",
+                "  my-server:",
+                "    url: https://old.example.com",
+                "    api_key: ${SRV_KEY}",
+            ]),
+            encoding="utf-8",
+        )
+        config._yaml_file_cache.clear()
+
+        # Load expanded, capture snapshot, update URL, save via snapshot
+        cfg = config._load_yaml_config_file(config_path)
+        _snapshot = deepcopy(cfg)
+        cfg["mcp_servers"]["my-server"]["url"] = "https://new.example.com"
+        config._save_yaml_config_file(config_path, cfg, snapshot=_snapshot)
+
+        saved = config._load_yaml_config_file_raw(config_path, _copy=False)
+        server = saved.get("mcp_servers", {}).get("my-server", {})
+
+        # Updated field is written
+        assert server.get("url") == "https://new.example.com"
+
+        # Unchanged ${VAR} sibling stays raw
+        assert "${SRV_KEY}" in str(server.get("api_key", "")), (
+            f"Expected ${{SRV_KEY}} in api_key, got {server.get('api_key')!r}"
+        )
+
+    def test_onboarding_writes_provider_without_model_section(self, tmp_path, monkeypatch):
+        """Onboarding: a config with only ``providers: {}`` and no model
+        section must still persist the provider config."""
+        import api.onboarding as onboarding
+        from api.config import _load_yaml_config_file_raw
+
+        config_path = tmp_path / "config.yaml"
+        monkeypatch.setattr(onboarding, "_get_config_path", lambda: config_path)
+        monkeypatch.setattr(onboarding, "reload_config", lambda: None)
+        monkeypatch.setattr(onboarding, "_get_active_hermes_home", lambda: tmp_path)
+        monkeypatch.setattr(onboarding, "_load_env_file", lambda _: {})
+        monkeypatch.setattr(onboarding, "_write_env_file", lambda _a, _b: None)
+
+        # Write config with only providers — no model section
+        config_path.write_text(
+            "\n".join([
+                "providers: {}",
+            ]),
+            encoding="utf-8",
+        )
+
+        # The regression: apply_self_hosted_provider_setup with do_activate=False
+        # and no model section would skip the save entirely
+        onboarding.apply_self_hosted_provider_setup({
+            "provider": "ollama",
+            "model": "llama3",
+            "base_url": "http://localhost:11434",
+        })
+
+        saved = _load_yaml_config_file_raw(config_path, _copy=False)
+        # provider section must exist and have base_url set
+        providers = saved.get("providers", {})
+        assert isinstance(providers, dict), f"Expected dict providers, got {type(providers)}"
