@@ -122,3 +122,52 @@ class TestArchitecturalConfigGuard:
         ticktick = saved.get("mcp_servers", {}).get("ticktick", {})
         assert ticktick.get("url") == "https://mcp.ticktick.com"
         assert ticktick.get("timeout") == 30
+
+    def test_list_env_var_survives_item_deleted_before_it(self, tmp_path, monkeypatch):
+        """A ``${VAR}`` in a list item is preserved when an item before it
+        is deleted — tests that the merge matches by value, not by index."""
+        import api.config as config
+
+        # Simulate: raw config has ["${TOKEN_A}", "${TOKEN_B}"] → expanded
+        # to ["secret_a", "secret_b"]. Caller deletes the first item and saves
+        # ["secret_b"]. The old index-based merge would compare value[0]
+        # "secret_b" against expanded_raw[0] "secret_a" — different → write
+        # literal. The fix matches by value across the full list, finds
+        # "secret_b" at the old index 1, and preserves raw[1] = "${TOKEN_B}".
+        monkeypatch.setenv("TOKEN_A", "secret_a")
+        monkeypatch.setenv("TOKEN_B", "secret_b")
+
+        config_path = tmp_path / "config.yaml"
+        monkeypatch.setattr(config, "_get_config_path", lambda: config_path)
+        monkeypatch.setattr(config, "reload_config", lambda: None)
+
+        config_path.write_text(
+            "\n".join([
+                "models:",
+                "  - ${TOKEN_A}",
+                "  - ${TOKEN_B}",
+                "agent:",
+                "  reasoning_effort: medium",
+            ]),
+            encoding="utf-8",
+        )
+
+        # Wipe caches so we read fresh
+        config._yaml_file_cache.clear()
+        _orig_cache = config._cfg_cache
+        config._cfg_cache = None
+
+        # Load expanded, delete first item, save
+        expanded = config._load_yaml_config_file(config_path)
+        expanded["models"] = [expanded["models"][1]]  # keep only the second
+        config._save_yaml_config_file(config_path, expanded)
+
+        config._cfg_cache = _orig_cache
+
+        # Read back raw — ${TOKEN_B} must survive at position 0
+        saved = config._load_yaml_config_file_raw(config_path, _copy=False)
+        models = saved.get("models", [])
+        assert len(models) == 1, f"Expected 1 model, got {len(models)}: {models}"
+        assert "${TOKEN_B}" in str(models[0]), (
+            f"Expected ${{TOKEN_B}} at shifted position, got: {models[0]!r}"
+        )
