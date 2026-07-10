@@ -770,8 +770,9 @@ def _deep_merge_onto_raw(
       * Keys in ``updates`` but not in ``raw`` are new additions.
       * Keys in ``raw`` but absent from ``updates`` were intentionally deleted.
 
-    Nested dicts are handled recursively so that changing ``model.default``
-    preserves ``model.api_key: ${OPENAI_API_KEY}`` in the output.
+    Nested dicts AND lists are handled recursively so that changing
+    ``model.default`` preserves ``model.api_key: ${OPENAI_API_KEY}``,
+    and changing one item in a list preserves ``${VAR}`` in the others.
     """
     merged = copy.deepcopy(raw)
 
@@ -786,6 +787,35 @@ def _deep_merge_onto_raw(
                 merged[key] = _deep_merge_onto_raw(
                     raw[key], expanded_raw[key], value,
                 )
+            elif (
+                isinstance(value, list)
+                and isinstance(raw[key], list)
+                and isinstance(expanded_raw[key], list)
+            ):
+                # Compare lists element by element so changing one item
+                # doesn't leak expanded ${VAR} references from others.
+                merged_list: list = []
+                for idx, u_item in enumerate(value):
+                    if idx < len(raw[key]):
+                        r_item = raw[key][idx]
+                        e_item = expanded_raw[key][idx]
+                        if (
+                            isinstance(u_item, dict)
+                            and isinstance(r_item, dict)
+                            and isinstance(e_item, dict)
+                        ):
+                            merged_list.append(_deep_merge_onto_raw(
+                                r_item, e_item, u_item,
+                            ))
+                        elif e_item == u_item:
+                            # Unchanged — preserve raw reference
+                            merged_list.append(r_item)
+                        else:
+                            merged_list.append(u_item)
+                    else:
+                        # New items beyond the raw list length
+                        merged_list.append(u_item)
+                merged[key] = merged_list
             elif expanded_raw[key] == value:
                 # Unchanged — keep raw's unexpanded value (${VAR} preserved)
                 merged[key] = raw[key]
