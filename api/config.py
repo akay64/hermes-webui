@@ -755,87 +755,65 @@ def _deep_merge_onto_raw(
     raw: dict,
     expanded_raw: dict,
     updates: dict,
+    dirty_set: set[tuple[str, ...]] | None = None,
 ) -> dict:
     """Merge ``updates`` onto ``raw``, preserving raw's ``${VAR}`` references.
 
-    For each key in ``updates``:
-      * If the key also exists in ``raw``, recursively compare the value against
-        the expanded version of ``raw[key]``. When they match (the caller didn't
-        touch this key), keep the raw (unexpanded) value so that ``${VAR}``
-        references are preserved.
-      * When they differ, the caller intentionally changed this key — use the
-        caller's value.
-      * Keys in ``updates`` but not in ``raw`` are new additions.
-      * Keys in ``raw`` but absent from ``updates`` were intentionally deleted.
+    The caller declares authorship via ``dirty_set`` — a set of path tuples
+    such as ``{("model", "default")}``.  How each key is resolved:
 
-    Nested dicts AND lists are handled recursively so that changing
-    ``model.default`` preserves ``model.api_key: ${OPENAI_API_KEY}``,
-    and changing one item in a list preserves ``${VAR}`` in the others.
+      * The key itself is in ``dirty_set`` → the caller authored it wholesale
+        — use ``updates[key]``, no recursion.
+
+      * No sub-path under the key is in ``dirty_set`` → the caller did not
+        touch this branch — preserve ``raw[key]`` unchanged.
+
+      * A sub-path under the key (e.g. ``("model", "provider")`` when the
+        current key is ``"model"``) is in ``dirty_set`` → the caller touched
+        sub-fields — recurse with the filtered sub-path set.
+
+    Equality with the expanded value is never tested.  The dirty set is the
+    single source of truth for write intent.
     """
+    if dirty_set is None:
+        dirty_set = set()
+
     merged = copy.deepcopy(raw)
 
     for key, value in updates.items():
+        keypath = (key,)
+
         if key in raw and key in expanded_raw:
-            if (
+            # Does the caller claim authorship at or below this key?
+            key_or_sub_dirty = any(
+                p and p[0] == key for p in dirty_set
+            )
+
+            if keypath in dirty_set:
+                # Caller authored this key wholesale
+                merged[key] = value
+            elif not key_or_sub_dirty:
+                # Nothing under this key was authored — preserve raw
+                merged[key] = raw[key]
+            elif (
                 isinstance(value, dict)
                 and isinstance(raw[key], dict)
                 and isinstance(expanded_raw[key], dict)
             ):
-                # Recurse into nested dicts to preserve ${VAR} at every level
+                # Sub-paths are dirty — recurse to merge per-key
+                sub_dirty = {
+                    p[1:] for p in dirty_set
+                    if len(p) > 1 and p[0] == key
+                }
                 merged[key] = _deep_merge_onto_raw(
                     raw[key], expanded_raw[key], value,
+                    dirty_set=sub_dirty,
                 )
-            elif (
-                isinstance(value, list)
-                and isinstance(raw[key], list)
-                and isinstance(expanded_raw[key], list)
-            ):
-                # Match by value, not by index — handles insert/delete shifts
-                # without leaking expanded ${VAR} references from shifted
-                # list positions.
-                merged_list: list = []
-                seen_indices: set = set()
-                for u_item in value:
-                    matched = False
-                    for i, (e_item, r_item) in enumerate(
-                        zip(expanded_raw[key], raw[key], strict=True)
-                    ):
-                        if i in seen_indices:
-                            continue
-                        if isinstance(u_item, dict) and isinstance(e_item, dict) and isinstance(r_item, dict):
-                            # Always recurse for dict items — a whole-item
-                            # equality check (e_item == u_item) defeats the
-                            # purpose when the caller changed one field while
-                            # keeping others. Without the recurse, the caller's
-                            # expanded dict (with literal secrets) is appended
-                            # as-is, leaking any ``${VAR}`` that was expanded in
-                            # untouched fields. _deep_merge_onto_raw handles
-                            # per-key preservation correctly: changed keys use
-                            # the caller's value, unchanged keys keep raw's
-                            # ``${VAR}`` reference.
-                            merged_list.append(
-                                _deep_merge_onto_raw(
-                                    r_item, e_item, u_item,
-                                )
-                            )
-                            seen_indices.add(i)
-                            matched = True
-                            break
-                        elif not isinstance(u_item, dict) and not isinstance(e_item, dict) and not isinstance(r_item, dict):
-                            if e_item == u_item:
-                                # Unchanged — preserve raw reference
-                                merged_list.append(r_item)
-                                seen_indices.add(i)
-                                matched = True
-                                break
-                    if not matched:
-                        merged_list.append(u_item)
-                merged[key] = merged_list
-            elif expanded_raw[key] == value:
-                # Unchanged — keep raw's unexpanded value (${VAR} preserved)
-                merged[key] = raw[key]
             else:
-                # Caller intentionally changed this key
+                # Dict/list mismatch, or scalar with sub-path dirty
+                # (e.g. caller passed a list for what was a scalar).
+                # The caller authored something under this key, so use
+                # their value.
                 merged[key] = value
         else:
             # New key not in the original file
@@ -849,16 +827,29 @@ def _deep_merge_onto_raw(
     return merged
 
 
-def _save_yaml_config_file(config_path: Path, config_data: dict) -> None:
+def _save_yaml_config_file(
+    config_path: Path,
+    config_data: dict,
+    dirty_set: set[tuple[str, ...]] | None = None,
+) -> None:
     # ── ARCHITECTURAL GUARD ──────────────────────────────────────────────
     # Prevent ``${VAR}`` secret leaks: merge the caller's dict onto the raw
-    # (unexpanded) file. Keys the caller did NOT change keep their raw
-    # ``${VAR}`` reference, so read-modify-write paths that loaded expanded
-    # configs cannot accidentally persist expanded secrets for untouched keys.
+    # (unexpanded) file. The caller explicitly declares which config paths
+    # it authored via ``dirty_set``; keys absent from the dirty set preserve
+    # their raw ``${VAR}`` reference.  This avoids the equality-based
+    # heuristic that could silently drop intentional writes (authored value
+    # happens to equal the env expansion) or leak expanded secrets (ambiguous
+    # provenance on list items).
+    if dirty_set is None:
+        raise TypeError(
+            "dirty_set is required. Callers must declare which config keys "
+            "they authored so the guard can distinguish intentional writes "
+            "from pass-through expanded values."
+        )
     raw = _load_yaml_config_file_raw(config_path, _copy=False)
     if raw:
         expanded_raw = _expand_env_vars(raw)
-        config_data = _deep_merge_onto_raw(raw, expanded_raw, config_data)
+        config_data = _deep_merge_onto_raw(raw, expanded_raw, config_data, dirty_set=dirty_set)
     # ── END GUARD ───────────────────────────────────────────────────────
 
     try:
@@ -3875,7 +3866,8 @@ def set_max_tokens(max_tokens) -> dict[str, int | None]:
         elif parsed_max_tokens is not None:
             config_data["max_tokens"] = parsed_max_tokens
         if should_save:
-            _save_yaml_config_file(config_path, config_data)
+            _save_yaml_config_file(config_path, config_data,
+                dirty_set={("max_tokens",)})
     if not should_save:
         return get_max_tokens_status()
     reload_config()
@@ -3897,7 +3889,8 @@ def set_reasoning_display(show: bool) -> dict:
             display_cfg = {}
         display_cfg["show_reasoning"] = bool(show)
         config_data["display"] = display_cfg
-        _save_yaml_config_file(config_path, config_data)
+        _save_yaml_config_file(config_path, config_data,
+            dirty_set={("display", "show_reasoning")})
     reload_config()
     return get_reasoning_status()
 
@@ -3931,7 +3924,8 @@ def set_reasoning_effort(
             agent_cfg = {}
         agent_cfg["reasoning_effort"] = raw
         config_data["agent"] = agent_cfg
-        _save_yaml_config_file(config_path, config_data)
+        _save_yaml_config_file(config_path, config_data,
+            dirty_set={("agent", "reasoning_effort")})
     reload_config()
     return get_reasoning_status(
         model_id=model_id,
@@ -4233,12 +4227,34 @@ def set_hermes_default_model(model_id: str, provider: str | None = None, advance
                 # stale base_url sent requests to the wrong host (#4728).
                 model_cfg.pop("base_url", None)
 
+        # Build the dirty set — only keys the caller explicitly authored.
+        # api_key and other ${VAR}-backed fields the user didn't touch
+        # stay in their raw form.
+        dirty: set[tuple[str, ...]] = {("model", "default")}
+        if persisted_provider:
+            dirty.add(("model", "provider"))
+        if "base_url" in model_cfg:
+            dirty.add(("model", "base_url"))
+        elif previous_provider and "base_url" not in model_cfg:
+            # base_url was explicitly deleted via pop() above
+            dirty.add(("model", "base_url"))
+
         _apply_advanced_model_options(model_cfg, advanced)
-        if not _main_model_supports_service_tier(persisted_model, persisted_provider):
+        if advanced:
+            # advanced options were explicitly authored — dirty the whole
+            # model section since _apply_advanced_model_options may have
+            # set/popped api_key, timeout, extra_body, etc.
+            dirty.add(("model",))
+        elif not _main_model_supports_service_tier(persisted_model, persisted_provider):
             model_cfg.pop("service_tier", None)
 
         config_data["model"] = model_cfg
-        _save_yaml_config_file(config_path, config_data)
+        if dirty == {("model",)}:
+            _save_yaml_config_file(config_path, config_data,
+                dirty_set={("model",)})
+        else:
+            _save_yaml_config_file(config_path, config_data,
+                dirty_set=dirty)
     # Reload outside the lock — reload_config() acquires _cfg_lock itself.
     reload_config()
     # Invalidate the TTL cache so the next /api/models call returns fresh data
@@ -4390,6 +4406,8 @@ def set_auxiliary_model(task: str, provider: str, model: str, advanced: dict | N
                 slot_cfg["model"] = ""
                 aux_cfg[slot] = slot_cfg
             config_data["auxiliary"] = aux_cfg
+            _save_yaml_config_file(config_path, config_data,
+                dirty_set={("auxiliary",)})
         else:
             aux_cfg = config_data.get("auxiliary", {})
             if not isinstance(aux_cfg, dict):
@@ -4399,11 +4417,17 @@ def set_auxiliary_model(task: str, provider: str, model: str, advanced: dict | N
                 slot_cfg = {}
             slot_cfg["provider"] = provider or "auto"
             slot_cfg["model"] = model or ""
+
+            dirty: set[tuple[str, ...]] = {
+                ("auxiliary", task, "provider"),
+                ("auxiliary", task, "model"),
+            }
             if provider and (provider.startswith("custom:") or provider == "custom"):
                 try:
                     _, _, resolved_base_url = resolve_model_provider(model)
                     if resolved_base_url:
                         slot_cfg["base_url"] = str(resolved_base_url).strip().rstrip("/")
+                        dirty.add(("auxiliary", task, "base_url"))
                 except Exception:
                     pass
             if advanced is not None:
@@ -4412,10 +4436,13 @@ def set_auxiliary_model(task: str, provider: str, model: str, advanced: dict | N
                 except ValueError as exc:
                     msg = str(exc).replace("advanced model options", "advanced auxiliary options")
                     raise ValueError(msg) from exc
+                # Advanced options were explicitly authored — dirty the
+                # whole slot since advanced may set api_key, timeout, etc.
+                dirty.add(("auxiliary", task))
             aux_cfg[task] = slot_cfg
             config_data["auxiliary"] = aux_cfg
-
-        _save_yaml_config_file(config_path, config_data)
+            _save_yaml_config_file(config_path, config_data,
+                dirty_set=dirty)
 
     reload_config()
     return {"ok": True, "task": task, "provider": provider, "model": model}
