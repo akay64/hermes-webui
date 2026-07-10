@@ -804,15 +804,24 @@ def _deep_merge_onto_raw(
                         if i in seen_indices:
                             continue
                         if isinstance(u_item, dict) and isinstance(e_item, dict) and isinstance(r_item, dict):
-                            if e_item == u_item:
-                                merged_list.append(
-                                    _deep_merge_onto_raw(
-                                        r_item, e_item, u_item,
-                                    )
+                            # Always recurse for dict items — a whole-item
+                            # equality check (e_item == u_item) defeats the
+                            # purpose when the caller changed one field while
+                            # keeping others. Without the recurse, the caller's
+                            # expanded dict (with literal secrets) is appended
+                            # as-is, leaking any ``${VAR}`` that was expanded in
+                            # untouched fields. _deep_merge_onto_raw handles
+                            # per-key preservation correctly: changed keys use
+                            # the caller's value, unchanged keys keep raw's
+                            # ``${VAR}`` reference.
+                            merged_list.append(
+                                _deep_merge_onto_raw(
+                                    r_item, e_item, u_item,
                                 )
-                                seen_indices.add(i)
-                                matched = True
-                                break
+                            )
+                            seen_indices.add(i)
+                            matched = True
+                            break
                         elif not isinstance(u_item, dict) and not isinstance(e_item, dict) and not isinstance(r_item, dict):
                             if e_item == u_item:
                                 # Unchanged — preserve raw reference
