@@ -4,8 +4,6 @@ Verifies that ``${VAR}`` environment variable references in config.yaml survive
 a read-modify-write cycle through a save path that reads expanded config.
 """
 
-from pathlib import Path
-
 import pytest
 
 
