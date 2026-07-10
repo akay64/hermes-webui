@@ -17,12 +17,13 @@ from api.config import (
     DEFAULT_WORKSPACE,
     _FALLBACK_MODELS,
     _HERMES_FOUND,
-    invalidate_models_cache,
     _PROVIDER_DISPLAY,
     _PROVIDER_MODELS,
     _get_config_path,
+    _save_yaml_config_file,
     get_available_models,
     get_config,
+    invalidate_models_cache,
     load_settings,
     reload_config,
     save_settings,
@@ -243,18 +244,6 @@ def _load_yaml_config(config_path: Path) -> dict:
     except Exception:
         return {}
 
-
-def _save_yaml_config(config_path: Path, config: dict) -> None:
-    try:
-        import yaml as _yaml
-    except ImportError as exc:
-        raise RuntimeError("PyYAML is required to write Hermes config.yaml") from exc
-
-    config_path.parent.mkdir(parents=True, exist_ok=True)
-    config_path.write_text(
-        _yaml.safe_dump(config, sort_keys=False, allow_unicode=True),
-        encoding="utf-8",
-    )
 
 
 def _normalize_model_for_provider(provider: str, model: str) -> str:
@@ -1026,7 +1015,10 @@ def apply_onboarding_setup(body: dict) -> dict:
         model_cfg.pop("base_url", None)
 
     cfg["model"] = model_cfg
-    _save_yaml_config(config_path, cfg)
+    dirty = {("model", "provider"), ("model", "default")}
+    if "base_url" in model_cfg:
+        dirty.add(("model", "base_url"))
+    _save_yaml_config_file(config_path, cfg, dirty_set=dirty)
 
     if api_key:
         _write_env_file(env_path, {provider_meta["env_var"]: api_key})
@@ -1102,9 +1094,12 @@ def apply_self_hosted_provider_setup(body: dict) -> dict:
         model_cfg["default"] = _normalize_model_for_provider(provider, model)
         model_cfg["base_url"] = base_url
         cfg["model"] = model_cfg
+        _save_yaml_config_file(config_path, cfg,
+            dirty_set={("providers", provider, "base_url"), ("model", "provider"), ("model", "default"), ("model", "base_url")})
     elif "model" in cfg:
         cfg["model"] = original_model_cfg
-    _save_yaml_config(config_path, cfg)
+        _save_yaml_config_file(config_path, cfg,
+            dirty_set={("providers", provider, "base_url"), ("model",)})
 
     if api_key and env_var:
         _write_env_file(_get_active_hermes_home() / ".env", {env_var: api_key})

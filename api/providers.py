@@ -2934,7 +2934,8 @@ def _clean_provider_key_from_config(provider_id: str) -> None:
                                 changed = True
 
             if changed:
-                _save_yaml_config_file(config_path, cfg)
+                _save_yaml_config_file(config_path, cfg,
+                    dirty_set={("providers", provider_id, "api_key"), ("model", "api_key"), ("custom_providers",)})
         # Sync in-memory cache and bust model TTL cache
         # MUST be called outside _cfg_lock to avoid deadlock:
         # _cfg_lock is a threading.Lock (non-reentrant) and
