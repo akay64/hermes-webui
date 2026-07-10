@@ -754,7 +754,69 @@ def _config_for_yaml_save(config_data: dict) -> dict:
     return data
 
 
+def _deep_merge_onto_raw(
+    raw: dict,
+    expanded_raw: dict,
+    updates: dict,
+) -> dict:
+    """Merge ``updates`` onto ``raw``, preserving raw's ``${VAR}`` references.
+
+    For each key in ``updates``:
+      * If the key also exists in ``raw``, recursively compare the value against
+        the expanded version of ``raw[key]``. When they match (the caller didn't
+        touch this key), keep the raw (unexpanded) value so that ``${VAR}``
+        references are preserved.
+      * When they differ, the caller intentionally changed this key — use the
+        caller's value.
+      * Keys in ``updates`` but not in ``raw`` are new additions.
+      * Keys in ``raw`` but absent from ``updates`` were intentionally deleted.
+
+    Nested dicts are handled recursively so that changing ``model.default``
+    preserves ``model.api_key: ${OPENAI_API_KEY}`` in the output.
+    """
+    merged = copy.deepcopy(raw)
+
+    for key, value in updates.items():
+        if key in raw and key in expanded_raw:
+            if (
+                isinstance(value, dict)
+                and isinstance(raw[key], dict)
+                and isinstance(expanded_raw[key], dict)
+            ):
+                # Recurse into nested dicts to preserve ${VAR} at every level
+                merged[key] = _deep_merge_onto_raw(
+                    raw[key], expanded_raw[key], value,
+                )
+            elif expanded_raw[key] == value:
+                # Unchanged — keep raw's unexpanded value (${VAR} preserved)
+                merged[key] = raw[key]
+            else:
+                # Caller intentionally changed this key
+                merged[key] = value
+        else:
+            # New key not in the original file
+            merged[key] = value
+
+    # Handle deletions: keys the caller removed from the config dict
+    for key in list(merged.keys()):
+        if key not in updates:
+            del merged[key]
+
+    return merged
+
+
 def _save_yaml_config_file(config_path: Path, config_data: dict) -> None:
+    # ── ARCHITECTURAL GUARD ──────────────────────────────────────────────
+    # Prevent ``${VAR}`` secret leaks: merge the caller's dict onto the raw
+    # (unexpanded) file. Keys the caller did NOT change keep their raw
+    # ``${VAR}`` reference, so read-modify-write paths that loaded expanded
+    # configs cannot accidentally persist expanded secrets for untouched keys.
+    raw = _load_yaml_config_file_raw(config_path, _copy=False)
+    if raw:
+        expanded_raw = _expand_env_vars(raw)
+        config_data = _deep_merge_onto_raw(raw, expanded_raw, config_data)
+    # ── END GUARD ───────────────────────────────────────────────────────
+
     try:
         import yaml as _yaml
     except ImportError as exc:
