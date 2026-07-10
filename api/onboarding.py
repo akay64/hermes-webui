@@ -1107,10 +1107,11 @@ def apply_self_hosted_provider_setup(body: dict) -> dict:
         model_cfg["default"] = _normalize_model_for_provider(provider, model)
         model_cfg["base_url"] = base_url
         cfg["model"] = model_cfg
-        _save_yaml_config(config_path, cfg)
     elif "model" in cfg:
         cfg["model"] = original_model_cfg
-        _save_yaml_config(config_path, cfg)
+
+    # Always save — providers.{provider}.base_url was always set above
+    _save_yaml_config(config_path, cfg)
 
     if api_key and env_var:
         _write_env_file(_get_active_hermes_home() / ".env", {env_var: api_key})
