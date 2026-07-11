@@ -12,7 +12,7 @@
 > Python 3.11, 3.12, and 3.13 (3 parallel shards each) against every PR, plus a ruff
 > lint gate, a headless browser smoke test, and a Docker smoke test.
 >
-> Notable architecture state: the bootstrap and first-run onboarding flow own setup discovery; the default WebUI state directory is `~/.hermes/webui`; `ctl.sh` provides a daemon wrapper for homelab installs; chat streaming is still WebUI-owned SSE with stream-ownership guards, cancellation, async manual compression, and turn-journal audit plumbing; provider/model discovery is profile-aware with live-model cache invalidation and custom-provider scoping. (Version/test-count numbers above are a periodic snapshot — the authoritative source is the latest git tag and `pytest --collect-only`.)
+> Notable architecture state: the bootstrap and first-run onboarding flow own setup discovery; the default WebUI state directory is `~/.hermes/webui`; `ctl.sh` provides a daemon wrapper for homelab installs; chat streaming is still WebUI-owned SSE with stream-ownership guards, cancellation, async manual compression, and turn-journal audit plumbing; in-place compression is DB-first and fail-closed; provider/model discovery is profile-aware with live-model cache invalidation and custom-provider scoping. (Version/test-count numbers above are a periodic snapshot — the authoritative source is the latest git tag and `pytest --collect-only`.)
 
 ---
 
@@ -308,6 +308,83 @@ on_tool callback:
 
 The approval surface-on-tool logic means approvals appear immediately after the tool
 fires (within the same SSE stream), without waiting for the next poll cycle.
+
+#### 4.4.1 Durable In-Place Compression
+
+Compression crosses two state stores, which must be kept conceptually distinct:
+
+    WebUI session sidecar (~/.hermes/webui/sessions/{sid}.json)
+        Visible transcript, model-facing context_messages, UI metadata,
+        compression anchors, and reconciliation watermarks.
+
+    Hermes Agent state.db
+        Durable session identity, active message rows, archived/compacted rows,
+        searchable history, and the authoritative live context used on resume.
+
+For `compression.in_place: true`, `state.db` is authoritative for the durable
+compression transition. The JSON sidecar remains the WebUI projection and keeps
+the full visible transcript, while its `context_messages` field represents the
+current model-facing context.
+
+The manual `/api/session/compress` lifecycle is intentionally DB-first:
+
+1. Resolve the profile-specific `state.db` and construct the Agent with its
+   `SessionDB`; manual compression is rejected when `in_place` is disabled.
+2. Acquire the WebUI per-session agent lock before taking the compression
+   snapshot. The lock remains held through the provider summary request, the
+   durable database transition, and the sidecar save. This is an intentional
+   exception to the normal short-lived mutation-lock convention: a concurrent
+   transcript write would make the summary snapshot stale.
+3. Read the active context from `state.db`, not from a potentially stale JSON
+   sidecar. A legacy WebUI session with no database rows may be seeded once from
+   its sidecar, but a session with archived rows and no active context is refused
+   rather than being overwritten.
+4. Ask the Agent compressor to produce the compacted context. Immediately before
+   archival, a commit guard verifies that the sidecar/session snapshot did not
+   change while the summary was being generated.
+5. The Agent calls `SessionDB.archive_and_compact()` in one database transaction:
+   currently-active rows become `active=0, compacted=1`, the compacted rows are
+   inserted as the new `active=1` context, and the session keeps the same durable
+   ID. Archived rows remain searchable and recoverable.
+6. Only after that database commit succeeds does WebUI update
+   `context_messages`, write the manual compression anchor and truncation
+   watermark, and save the JSON sidecar.
+
+The resulting state transition is:
+
+| Outcome | `state.db` | WebUI sidecar |
+|---|---|---|
+| Before compression | Original rows are active | Full visible transcript and uncompressed context |
+| Successful in-place compression | Original rows are archived/compacted; new compacted context is active; session ID is unchanged | Visible transcript is retained; `context_messages` is compressed; manual anchor/watermark are written |
+| Summary failure, stale snapshot, unavailable DB, or DB commit failure | Original active rows remain unchanged | No compressed context or compression watermark is published |
+
+This is fail-closed in the important direction: WebUI cannot publish a
+compressed JSON context while `state.db` still exposes the old active context.
+The two stores are not one atomic transaction, however. A filesystem failure
+after the database commit can leave the sidecar temporarily stale, and deleting
+or corrupting a sidecar does not guarantee reconstruction of every UI field and
+compression-history detail from `state.db`. A complete sidecar projection/rebuild
+remains a separate recovery follow-up.
+
+Automatic in-place compression is Agent-owned, but uses the same durable
+`archive_and_compact()` transition. The Agent resets its per-attempt commit
+signal and sets it only after the database archive succeeds; WebUI accepts an
+automatic compression boundary for writeback only when that signal is true.
+With `abort_on_summary_failure: true`, an unsuccessful summary remains a no-op
+for the conversation rather than triggering archival or a context rewrite.
+
+The legacy `compression.in_place: false` rotation path, branch/duplicate
+database indexing, and exact sidecar reconstruction are outside this contract.
+The Agent's low-level compression-lock compatibility fallback may also proceed
+without that lock when a long-lived process has version-skewed modules; this is
+separate from the durable commit guard. Restarting the process after an Agent
+update restores the lock implementation, while the DB-first invariant still
+prevents an uncommitted in-place result from being reported as successful.
+
+Regression coverage includes the committed-versus-uncommitted compression
+signal, manual compression recovery/watermark behavior, and DB-backed manual
+compression fakes covering seed, archive, summary-abort, and commit-failure
+paths.
 
 ### 4.5 Approval System Integration
 
@@ -715,6 +792,7 @@ authored value that is equal to its expanded snapshot value.
 | B12 | Low      | Preview panel display:none to flex layout jump       | FIXED Sprint 4   | visibility/opacity transition replaces display:none toggle |
 | B13 | Low      | No CORS headers                                      | Open             | Phase H |
 | B14 | Low      | No keyboard shortcut for new chat                    | FIXED Sprint 3   | Cmd/Ctrl+K triggers newSession() from anywhere |
+| B15 | Critical | Manual compression could publish a compressed sidecar without a durable DB commit | FIXED July 2026 | DB-backed in-place lifecycle, per-session serialization, commit guard, and DB-first sidecar writeback |
 | TD1 | Critical | Env vars are process-global (concurrent request bug) | PARTIAL Sprint 5 | Thread-local _set_thread_env() added. Per-session lock from Sprint 4. Process-level env still written as fallback. Full fix needs terminal tool to read thread-local. |
 | TD2 | High     | SESSIONS cache: no eviction, locking missing         | FIXED Sprint 5   | OrderedDict + LRU cap 100 + move_to_end on access. LOCK from Sprint 1. Complete. |
 | TD3 | High     | No test coverage                                     | PARTIAL Sprint 1 | 19 HTTP integration tests added; unit tests pending Phase A split |
@@ -722,6 +800,7 @@ authored value that is equal to its expanded snapshot value.
 | TD5 | Medium   | No request validation (KeyError -> 500 + traceback)  | FIXED Sprint 4   | All endpoints hardened: /api/list, /api/file, /api/crons/* all return clean 400/404 |
 | TD6 | Low      | all_sessions() full directory scan every call        | FIXED Sprint 5   | Session index file (_index.json) built on every save. all_sessions() reads index O(1). Phase C partial. |
 | TD7 | Low      | No structured logging                                | FIXED Sprint 1   | log_request() override emits JSON per request |
+| TD8 | High     | JSON sidecar and state.db are not one atomic store; exact sidecar rebuild is not guaranteed after loss or corruption | Open | Compression now commits DB first, but complete sidecar projection/recovery remains a separate follow-up |
 
 ---
 
@@ -1128,6 +1207,27 @@ Resolution: Phase B replaces with thread-local or explicit parameter passing.
 This section records what was actually built and changed in each sprint. It is the
 permanent history of the codebase. Update it at the end of every sprint.
 
+### July 2026: Fail-Closed In-Place Compression
+
+Manual WebUI compression now follows the Hermes Agent's durable in-place
+compression lifecycle instead of rewriting only the JSON sidecar. The route reads
+the active context from the profile's `state.db`, serializes the session with the
+per-session lock while the summary is generated, verifies the snapshot immediately
+before commit, and calls `SessionDB.archive_and_compact()` before saving the
+compressed `context_messages` and manual truncation watermark to JSON.
+
+The database transition is non-destructive: old active rows are retained as
+`active=0, compacted=1` and the compacted context becomes the new active set under
+the same session ID. Summary failure, database failure, and stale-session detection
+fail closed, so the previous context remains usable and no uncommitted compressed
+sidecar is published. Automatic in-place compression uses the same Agent-side
+archive/commit signal for WebUI writeback.
+
+This change intentionally targets `compression.in_place: true` with
+`abort_on_summary_failure: true`. Legacy session rotation, branch/duplicate
+database indexing, and full sidecar reconstruction after deletion or corruption
+remain separate follow-up work.
+
 ### Sprint 1 (March 30, 2026): Bug Fixes, Arch Foundations, First Tests
 
 **Tracks:** Bug fixes (7), Architecture (3), Tests (1)
@@ -1305,6 +1405,14 @@ RULE-8: do NOT expose tracebacks to API clients.
 RULE-9: Pattern_keys, not pattern_key, for multi-pattern approvals.
     The approval module may include both pattern_key (singular, legacy) and pattern_keys
     (plural, all matched patterns). Always iterate pattern_keys when approving.
+
+RULE-10: In-place compression must be DB-first and fail-closed.
+    Manual `/api/session/compress` must use the active `state.db` context, hold the
+    per-session lock through summary generation and both persistence steps, and
+    update the JSON sidecar only after `SessionDB.archive_and_compact()` succeeds.
+    A summary failure, stale snapshot, unavailable database, or failed DB commit
+    must leave the prior active context intact. Automatic in-place writeback must
+    likewise require the Agent's confirmed durable-commit signal.
 
 ### Adding New API Endpoints
 
