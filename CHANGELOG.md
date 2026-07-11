@@ -5,6 +5,12 @@
 
 ### Fixed
 
+- **Plugin-provided model providers route correctly when set as the default.** A model from a plugin-only provider (e.g. a `@plugin:model` route) was surfaced in the catalog but, when that plugin provider was also the configured default, the request dropped the `@plugin:` routing hint and went to the wrong backend. Provider-hint resolution now applies plugin routing before the configured-provider bare-passthrough. Thanks @alexfoxtm. (#5909, #5461)
+
+- **Composer no longer double-sends or re-uploads on a fast second send.** The message text + its attachments are now captured and the textarea cleared immediately on send, before the async upload round-trip, so a re-entrant / interrupt-mode send can't re-read stale composer text and submit the same message twice or inherit the previous send's attachment. A clipboard-copy failure after a successful send no longer shows a false "failed", and a draft typed during the upload window is no longer clobbered. Thanks @harryazj. (#5912, #4750)
+
+- **Mobile dictation stays alive through natural pauses.** On touch devices the composer mic now keeps a dictation session going across the brief silences that used to end it (desktop stays one-shot), with a serialized screen wake-lock so rapid start/stop/visibility changes can't leak or drop it, and cleaner fallback to recording when the browser's speech recognition is unavailable. Thanks @brianmmaina. (#5915, #4732)
+
 - **CSV files shared in chat keep a download link again.** A `MEDIA:` CSV rendered an inline table preview but — unlike every other media type — dropped the download affordance, so the file couldn't be retrieved once previewed. The preview header now shows a 📎 download link (via the correct `api/media?…&download=1` path), and the link stays visible even when the inline table itself fails to render, so CSV files exchanged through chat output remain retrievable. Thanks @ruizanthony. (#5792)
 
 ### Added
