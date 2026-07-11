@@ -3032,6 +3032,54 @@ function _currentLoadedRenderableMessageCount(){
   return count;
 }
 
+// Settled SSE payloads intentionally carry the full transcript, but the
+// browser may currently be showing only a paginated tail. Keep terminal
+// settlement on the same server-owned window contract as initial loads and
+// older-message paging instead of promoting a truncated pane to full history.
+// The caller supplies the next session metadata when it is available so the
+// newly completed turn has room in the requested window. Recovery paths do
+// not have that metadata before their first request and reserve one normal
+// page as a conservative completion allowance.
+function _settledSessionMessageWindowLimit(nextSession, options){
+  if(typeof _messagesTruncated==='undefined'||!_messagesTruncated) return null;
+  const loadedRenderableCount=_currentLoadedRenderableMessageCount();
+  const loadedMessageCount=Array.isArray(S.messages)?S.messages.length:0;
+  const loadedWindow=Math.max(0,loadedRenderableCount);
+  const priorMessageCount=Math.max(
+    0,
+    Number(S.session&&S.session.message_count)||loadedMessageCount
+  );
+  const nextMessageCount=Math.max(
+    priorMessageCount,
+    Number(nextSession&&nextSession.message_count)||priorMessageCount
+  );
+  const appendedRawCount=Math.max(0,nextMessageCount-priorMessageCount);
+  const recoveryAllowance=options&&options.reserveNewTurn?_INITIAL_MSG_LIMIT:0;
+  return Math.max(
+    _INITIAL_MSG_LIMIT,
+    loadedWindow,
+    loadedWindow+appendedRawCount,
+    loadedWindow+recoveryAllowance
+  );
+}
+
+function _settledSessionMessageWindowUrl(sid, nextSession, options){
+  const base=`/api/session?session_id=${encodeURIComponent(sid)}&messages=1&resolve_model=0`;
+  const limit=_settledSessionMessageWindowLimit(nextSession,options);
+  return limit===null?base:`${base}&msg_limit=${encodeURIComponent(limit)}`;
+}
+
+async function _fetchSettledSessionMessageWindow(sid, nextSession, options){
+  const limit=_settledSessionMessageWindowLimit(nextSession,options);
+  if(limit===null) return null;
+  const data=await api(
+    _settledSessionMessageWindowUrl(sid,nextSession,options),
+    {timeoutMs:120000}
+  );
+  if(!data||!data.session) throw new Error('Settled session window unavailable');
+  return data.session;
+}
+
 function _captureSameSessionForceReloadHint(sid){
   const loadedRenderableCount=_currentLoadedRenderableMessageCount();
   const loadedMessageCount=Array.isArray(S.messages)?S.messages.length:0;
