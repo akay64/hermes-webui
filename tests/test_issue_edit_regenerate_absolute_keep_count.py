@@ -1,6 +1,7 @@
 """Regression: edit/regenerate use absolute keep_count (#2184 pattern)."""
 
 import re
+import subprocess
 from pathlib import Path
 
 REPO = Path(__file__).resolve().parents[1]
@@ -9,7 +10,10 @@ UI_JS = (REPO / "static" / "ui.js").read_text(encoding="utf-8")
 
 def _function_body(src: str, name: str) -> str:
     needle_async = f"async function {name}"
-    start = src.index(needle_async)
+    needle_sync = f"function {name}"
+    start = src.find(needle_async)
+    if start < 0:
+        start = src.index(needle_sync)
     brace = src.index("{", start)
     depth = 0
     for i in range(brace, len(src)):
@@ -40,3 +44,24 @@ def test_submit_edit_captures_absolute_before_await():
     assert cap
     first_await = re.search(r"\bawait\b", body)
     assert first_await and cap.start() < first_await.start()
+
+
+def test_truncated_edit_and_regenerate_do_not_force_full_reload():
+    """A visible paginated target can be truncated without loading all history."""
+    for name in ("submitEdit", "regenerateResponse"):
+        body = "".join(_function_body(UI_JS, name).split())
+        assert "if(!loadedWindowTruncated&&typeof_ensureAllMessagesLoaded==='function')" in body
+        assert "_loadedMessageSliceEndForKeepCount(absoluteKeepCount,loadedWindowOffset,loadedWindowTruncated)" in body
+
+
+def test_loaded_window_slice_end_preserves_absolute_keep_count_semantics():
+    """Translate only the local array slice; the API keep_count stays absolute."""
+    helper = _function_body(UI_JS, "_loadedMessageSliceEndForKeepCount")
+    script = f"""
+const assert = require('assert');
+{helper}
+assert.strictEqual(_loadedMessageSliceEndForKeepCount(103, 70, true), 33);
+assert.strictEqual(_loadedMessageSliceEndForKeepCount(103, 0, false), 103);
+assert.strictEqual(_loadedMessageSliceEndForKeepCount(0, 70, true), 0);
+"""
+    subprocess.run(["node", "-e", script], check=True, capture_output=True, text=True)

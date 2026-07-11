@@ -290,10 +290,13 @@ cursor. SSE recovery uses the same path.
 
 The terminal paths do not promote `_messageRenderWindowSize` to the full transcript.
 Explicit history actions such as loading older messages, session-start navigation,
-export, edit, and regenerate may still request or render the full session. If the
-bounded refresh fails, the browser keeps its bounded in-flight/local transcript rather
-than replacing it with the full SSE payload. This keeps the visible transcript and
-the pagination state coherent without changing the experimental virtualization
+and export may still request or render the full session. Edit/regenerate targets
+already visible in a paginated window keep the server-facing absolute `keep_count`
+but slice only the loaded local window; they do not expand the transcript merely to
+submit the mutation. Reconnect/refresh recovery also requests a bounded window. If a
+bounded refresh fails, the browser keeps its bounded in-flight/local transcript
+rather than replacing it with the full SSE payload. This keeps the visible transcript
+and pagination state coherent without changing the experimental virtualization
 preference or the Agent repository.
 
 Fallback sync endpoint: POST /api/chat still exists and holds the connection open until
@@ -1298,10 +1301,19 @@ The WebUI's terminal `done` event carries a full session snapshot, but the brows
 now preserves an already-paginated session window when applying that snapshot. It
 refreshes the canonical bounded tail through `/api/session?msg_limit=...`, retaining
 server-owned offsets, tool-result rows, activity metadata, and the newly completed
-turn without rendering thousands of older messages after every completion. SSE error
-and `stream_end` recovery use the same bounded request. Explicit history-loading
-actions remain unchanged, and a failed refresh keeps the bounded local/in-flight view
-instead of promoting the full terminal payload.
+turn without rendering thousands of older messages after every completion. SSE error,
+`stream_end`, and reconnect recovery use the same bounded request. Editing or
+regenerating a visible message uses the absolute server keep-count while trimming
+only the local window. Explicit history-loading actions remain unchanged, and a
+failed refresh keeps the bounded local/in-flight view instead of promoting the full
+terminal payload.
+
+Same-session force refreshes (metadata reconciliation and SSE recovery) keep the
+existing per-session SSE subscription alive while the bounded window is fetched.
+The browser also ignores a recovery frame while another session load owns the
+pane. This avoids creating an artificial subscribe gap that can repeatedly
+re-enter recovery for a large settled session, and prevents a stale event from
+hijacking a user-initiated session switch.
 
 ### Sprint 1 (March 30, 2026): Bug Fixes, Arch Foundations, First Tests
 

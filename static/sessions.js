@@ -1634,6 +1634,11 @@ async function loadSession(sid){
   const forceReload = !!opts.force;
   const currentSid = S.session ? S.session.session_id : null;
   const sameSessionForceReload = forceReload && currentSid===sid;
+  // A recovery event or a second refresh may arrive while the first
+  // same-session reload is still fetching its bounded window. It cannot add
+  // any information and would supersede the active generation, so let the
+  // existing owner finish instead of starting another destructive reload.
+  if(sameSessionForceReload&&_loadingSessionId===sid) return;
   // Clicking the already-open session in the sidebar is a no-op. Reloading it
   // tears down active pane state and can reset the long-session scroll window
   // to the top even though the user did not navigate anywhere. Explicit
@@ -1671,7 +1676,13 @@ async function loadSession(sid){
     _scrollPinned = true;
   }
   stopApprovalPolling();hideApprovalCard(forceReload);
-  if(typeof stopSessionStream==='function') stopSessionStream();
+  // A same-session force reload is a transcript refresh, not a navigation.
+  // Keep the healthy per-session SSE subscription alive while the metadata and
+  // bounded message window are fetched. Tearing it down here creates an
+  // artificial subscribe gap; the server can then emit its recovery event,
+  // which re-enters loadSession() and repeats the cycle for large sessions.
+  // Cross-session navigation still closes the old session's stream.
+  if(!sameSessionForceReload&&typeof stopSessionStream==='function') stopSessionStream();
   _yoloEnabled=false;_updateYoloPill();
   if(typeof stopClarifyPolling==='function') stopClarifyPolling();
   if(typeof hideClarifyCard==='function') hideClarifyCard(forceReload, forceReload?'external-refresh':'dismissed');
@@ -2951,10 +2962,16 @@ function _currentLoadedRenderableMessageCount(){
 // not have that metadata before their first request and reserve one normal
 // page as a conservative completion allowance.
 function _settledSessionMessageWindowLimit(nextSession, options){
-  if(typeof _messagesTruncated==='undefined'||!_messagesTruncated) return null;
+  const forceBounded=!!(options&&options.forceBounded);
+  if(typeof _messagesTruncated==='undefined'||(!_messagesTruncated&&!forceBounded)) return null;
   const loadedRenderableCount=_currentLoadedRenderableMessageCount();
   const loadedMessageCount=Array.isArray(S.messages)?S.messages.length:0;
-  const loadedWindow=Math.max(0,loadedRenderableCount);
+  // A recovery request can run before the normal paginated load has established
+  // _messagesTruncated. Do not let an already-full local transcript turn that
+  // recovery request back into a full server reload.
+  const loadedWindow=forceBounded&&!_messagesTruncated
+    ? 0
+    : Math.max(0,loadedRenderableCount);
   const priorMessageCount=Math.max(
     0,
     Number(S.session&&S.session.message_count)||loadedMessageCount

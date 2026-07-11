@@ -46,6 +46,27 @@ def test_load_session_supports_force_reload_for_external_refresh():
     assert "loadSession(sid, {force:true" in SESSIONS_JS
 
 
+def test_same_session_force_reload_does_not_restart_healthy_session_stream():
+    """Refreshing a long transcript must not manufacture an SSE recovery gap."""
+    body = _function_body(SESSIONS_JS, "loadSession")
+    assert "const sameSessionForceReload = forceReload && currentSid===sid;" in body
+    assert "if(sameSessionForceReload&&_loadingSessionId===sid) return;" in body
+    assert "if(!sameSessionForceReload&&typeof stopSessionStream==='function') stopSessionStream();" in body
+
+
+def test_session_updated_recovery_does_not_hijack_an_inflight_navigation():
+    """A stale session event must not restart the session being left."""
+    # The per-session listener lives in messages.js; keep this assertion here
+    # with the other active-session reconciliation contracts because it guards
+    # the loadSession ownership state shared by both modules.
+    messages = Path("static/messages.js").read_text(encoding="utf-8")
+    event_start = messages.index("addEventListener('session-updated'")
+    event_body = messages[event_start : event_start + 1800]
+    guard = "if (typeof _loadingSessionId !== 'undefined' && _loadingSessionId) return;"
+    assert guard in event_body
+    assert event_body.index(guard) < event_body.index("loadSession(")
+
+
 def test_active_session_external_refresh_uses_metadata_then_force_reload():
     assert "function ensureActiveSessionExternalRefreshPoll()" in SESSIONS_JS
     assert "async function refreshActiveSessionIfExternallyUpdated(reason)" in SESSIONS_JS

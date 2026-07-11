@@ -6488,7 +6488,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
     }
     try{
       const restoreUrl=typeof _settledSessionMessageWindowUrl==='function'
-        ? _settledSessionMessageWindowUrl(activeSid,null,{reserveNewTurn:true})
+        ? _settledSessionMessageWindowUrl(activeSid,null,{reserveNewTurn:true,forceBounded:true})
         : `/api/session?session_id=${encodeURIComponent(activeSid)}`;
       const data=await api(restoreUrl);
       // Opus #2852 race-fix: if a late `done` event ran the finalize path while
@@ -7562,6 +7562,11 @@ function startSessionStream(sid) {
           : (S.session && S.session.session_id === sid);
         if (!isCurrent) return;
         if (S.activeStreamId) return;
+        // Do not let a recovery event start a second load while a navigation or
+        // same-session refresh already owns the pane. In particular, a
+        // cross-session click must not be hijacked by a stale event from the
+        // long session that was just on screen.
+        if (typeof _loadingSessionId !== 'undefined' && _loadingSessionId) return;
         // Re-check against our CURRENT known count — a concurrent load may have
         // already caught us up between the server's emit and now.
         const localCount = (S.session && S.session.session_id === sid && Number.isFinite(Number(S.session.message_count)))
