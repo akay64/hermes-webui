@@ -79,11 +79,15 @@ def test_coerce_preserves_effort_for_unrecognized_model():
         "some-unknown-model-xyz",
         provider_id="some-custom-provider",
     ) == "high"
+    # #3505 default-deny refinement (maintainer 2026-07-11): 'max' is a supra-
+    # ceiling WebUI-only level, so on an UNRECOGNIZED provider it degrades to
+    # xhigh (a truly-unknown provider would 400 on max). All OTHER levels still
+    # preserve verbatim below.
     assert cfg.coerce_reasoning_effort_for_model(
         "max",
         "brand-new-model-2099",
         provider_id="some-custom-provider",
-    ) == "max"
+    ) == "xhigh"
     # 'none' / unset still pass through unchanged for unknown models.
     assert cfg.coerce_reasoning_effort_for_model(
         "none", "some-unknown-model-xyz", provider_id="custom"
@@ -387,3 +391,29 @@ def test_max_degrades_for_azure_bedrock_hosted_legacy_claude():
     assert cfg.coerce_reasoning_effort_for_model(
         "max", model_id="claude-opus-4.6", provider_id="azure-foundry"
     ) == "max"
+
+
+def test_max_degrades_on_unknown_provider_but_other_levels_preserved():
+    # #3505 default-deny refinement (maintainer call 2026-07-11): 'max' is above
+    # the universal ceiling, so an unknown/custom provider (empty capability list)
+    # must degrade 'max'->'xhigh' rather than send an unsupported level — while all
+    # other levels keep the conservative preserve-verbatim behavior.
+    assert cfg.coerce_reasoning_effort_for_model(
+        "max", model_id="some-unknown-model", provider_id="customprovider"
+    ) == "xhigh"
+    # other levels still preserved verbatim for an unknown provider
+    for eff in ("minimal", "low", "medium", "high", "xhigh"):
+        assert cfg.coerce_reasoning_effort_for_model(
+            eff, model_id="some-unknown-model", provider_id="customprovider"
+        ) == eff, f"{eff} must be preserved verbatim on unknown provider (#3505)"
+
+
+def test_max_only_offered_in_ui_when_actually_supported():
+    # The dropdown gates on resolve_model_reasoning_efforts(): 'max' appears ONLY
+    # for models whose supported list includes it (adaptive Claude, DeepSeek), and
+    # is absent for legacy/capped models and unknown providers.
+    assert "max" in cfg.resolve_model_reasoning_efforts("claude-opus-4.6", provider_id="anthropic")
+    assert "max" in cfg.resolve_model_reasoning_efforts("deepseek-reasoner", provider_id="deepseek")
+    assert "max" not in cfg.resolve_model_reasoning_efforts("claude-sonnet-4-5", provider_id="anthropic")
+    assert "max" not in cfg.resolve_model_reasoning_efforts("gpt-5.1", provider_id="openai")
+    assert "max" not in cfg.resolve_model_reasoning_efforts("gemini-3-pro", provider_id="gemini")

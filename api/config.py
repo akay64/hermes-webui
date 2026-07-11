@@ -3272,6 +3272,29 @@ def _filter_reasoning_efforts_for_provider(
     return normalized
 
 
+_KNOWN_REASONING_PROVIDERS = frozenset({
+    "anthropic", "claude", "anthropic-claude",
+    "openai", "openai-api", "openai-codex",
+    "azure", "azure-openai", "azure-foundry",
+    "bedrock", "aws-bedrock", "vertex", "google-vertex",
+    "gemini", "google", "google-gemini",
+    "deepseek", "x-ai", "xai", "grok",
+    "copilot", "github-copilot", "openrouter",
+})
+
+
+def _provider_known_reasoning_capable(provider_id) -> bool:
+    """True if the provider is one we recognize as reasoning-capable.
+
+    Used to gate the 'max' default-deny: for a RECOGNIZED provider whose specific
+    model we couldn't resolve (empty capability list), preserve 'max' since those
+    providers genuinely support it; for a truly unknown/custom provider, degrade
+    'max' -> 'xhigh' so we never send a supra-ceiling level that would 400.
+    """
+    prov = _resolve_provider_alias(str(provider_id or "").strip().lower())
+    return prov in _KNOWN_REASONING_PROVIDERS
+
+
 def _is_pre_adaptive_anthropic(bare_model: str) -> bool:
     """True for Claude models that predate the adaptive-thinking (4.6+) generation.
 
@@ -3567,6 +3590,35 @@ def resolve_model_reasoning_efforts(
     provider_id: str | None = None,
     base_url: str | None = None,
 ) -> list[str]:
+    """Return supported reasoning-effort levels for *model_id*, or [] if none.
+
+    Always passes the sourced list through _filter_reasoning_efforts_for_provider
+    so the hard provider ceilings (openai-codex/openai/azure GPT-5 cap at xhigh,
+    Gemini + pre-adaptive/cloud-hosted Claude cap at xhigh) are applied uniformly
+    — the UI dropdown (which gates options on this list) and coercion therefore
+    agree: 'max' is offered ONLY for models whose native ladder genuinely includes
+    it, and is stripped everywhere it would be rejected/mishandled.
+    """
+    raw = _resolve_model_reasoning_efforts_impl(model_id, provider_id, base_url)
+    if not raw:
+        return raw
+    # Preserve any explicit 'none' sentinel (valid UI option = "no reasoning");
+    # the ceiling filter only knows the reasoning LEVELS.
+    had_none = "none" in raw
+    filtered = _filter_reasoning_efforts_for_provider(
+        [e for e in raw if e != "none"], str(model_id or ""), str(provider_id or "")
+    )
+    if had_none:
+        # Keep 'none' in its original leading position if it was there.
+        return ["none", *filtered] if raw and raw[0] == "none" else [*filtered, "none"]
+    return filtered
+
+
+def _resolve_model_reasoning_efforts_impl(
+    model_id: str | None = None,
+    provider_id: str | None = None,
+    base_url: str | None = None,
+) -> list[str]:
     """Return supported reasoning-effort levels for *model_id*, or [] if none."""
     model = str(model_id or "").strip()
     if not model:
@@ -3727,7 +3779,20 @@ def coerce_reasoning_effort_for_model(
     # still applies. When the set is empty we can't tell "unsupported" from
     # "unknown", so preserve the user's configured effort verbatim where it is
     # still valid. (#3505 review)
+    #
+    # EXCEPTION for 'max' (the #3505 default-deny refinement, maintainer call
+    # 2026-07-11): 'max' is a WebUI-only level ABOVE the universally-safe ceiling
+    # 'xhigh'. A genuinely unknown/custom provider will 400 on it. So when the
+    # capability list is empty AND the provider is not one we recognize as
+    # reasoning-capable, degrade 'max' -> 'xhigh' rather than send an unsupported
+    # supra-ceiling level. But do NOT degrade for a RECOGNIZED reasoning provider
+    # whose specific model id we simply couldn't resolve (e.g. claude-opus-latest,
+    # a brand-new adaptive id) — those genuinely support 'max', and the ceiling
+    # filter above already stripped it for any KNOWN-capped model. All other
+    # levels (minimal..xhigh) keep the conservative preserve-verbatim behavior.
     if not supported:
+        if raw == "max" and not _provider_known_reasoning_capable(provider_id):
+            return "xhigh"
         return raw
     if raw in supported:
         return raw
