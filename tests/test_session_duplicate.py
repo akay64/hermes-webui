@@ -265,7 +265,7 @@ def test_duplicate_uses_deepcopy_for_messages():
 
 
 def test_duplicate_explicitly_persists_to_disk():
-    """The duplicate must call .save() — otherwise it vanishes on refresh.
+    """The duplicate must use the durable child-session bridge.
 
     Static-grep regression test: pre-fix, the new endpoint never persisted
     the duplicate to disk. The session sat in SESSIONS only until the user
@@ -278,8 +278,8 @@ def test_duplicate_explicitly_persists_to_disk():
     assert duplicate_start != -1, "Duplicate endpoint not found"
     lines = content[duplicate_start:].split('\n')
     endpoint_code = '\n'.join(lines[:100])
-    assert 'copied_session.save()' in endpoint_code, \
-        "duplicate must call .save() explicitly — without it the copy vanishes on refresh"
+    assert 'persist_webui_child_session' in endpoint_code, \
+        "duplicate must use the durable child-session bridge before returning"
 
 
 def test_duplicate_resets_pinned_and_archived():
