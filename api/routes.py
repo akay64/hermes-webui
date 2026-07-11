@@ -56,6 +56,10 @@ from api.session_events import (
 )
 from api.gateway_restart import restart_active_profile_gateway
 from api.shares import create_or_refresh_share, load_share, revoke_share
+from api.session_db_bridge import (
+    WebUISessionDBBridgeError,
+    persist_webui_child_session,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -2845,7 +2849,7 @@ from api.helpers import (
     _CLIENT_DISCONNECT_ERRORS,
 )
 from api.agent_health import build_agent_health_payload
-from api.gateway_chat import gateway_chat_config_status
+from api.gateway_chat import gateway_chat_config_status, webui_gateway_chat_enabled
 from api.request_diagnostics import RequestDiagnostics
 from api.system_health import build_system_health_payload
 
@@ -14071,87 +14075,96 @@ def handle_post(handler, parsed) -> bool:
                 return bad(handler, "session_id is required")
             if _session_is_subagent_view_only(sid):
                 return bad(handler, "Subagent sessions are view-only and cannot be duplicated from WebUI", 400)
+            if webui_gateway_chat_enabled(load_settings()):
+                return bad(
+                    handler,
+                    "Durable WebUI duplication is not available in gateway mode.",
+                    501,
+                )
 
-            session = Session.load(sid)
-            if not session:
-                # 404, not 400 — missing resource, not a malformed request.
-                return bad(handler, "Session not found", status=404)
+            with _get_session_agent_lock(sid):
+                session = Session.load(sid)
+                if not session:
+                    # 404, not 400 — missing resource, not a malformed request.
+                    return bad(handler, "Session not found", status=404)
 
-            # Deep-copy mutable lists so the duplicate is *actually* independent.
-            # `Session.__init__` does `self.messages = messages or []` — plain
-            # assignment, no copy. Without deepcopy, both sessions share the same
-            # list object in memory; appending to one mutates the other.
-            # Items inside `messages` are dicts with mutable values (tool_calls,
-            # content arrays), so a shallow `list(...)` is not enough.
-            copied_session = Session(
-                session_id=uuid.uuid4().hex[:12],
-                # Defensive: legacy sessions may have title=None on disk; fall back to 'Untitled'
-                # so `+ " (copy)"` doesn't TypeError.
-                title=(session.title or "Untitled") + " (copy)",
-                workspace=session.workspace,
-                model=session.model,
-                model_provider=session.model_provider,
-                messages=copy.deepcopy(session.messages),
-                tool_calls=copy.deepcopy(session.tool_calls),
-                # Reset ephemeral / per-session-instance flags. Duplicating an
-                # archived conversation should produce a visible (un-archived)
-                # copy; pinned status doesn't transfer either.
-                pinned=False,
-                archived=False,
-                project_id=session.project_id,
-                profile=session.profile,
-                input_tokens=session.input_tokens,
-                output_tokens=session.output_tokens,
-                estimated_cost=session.estimated_cost,
-                cache_read_tokens=getattr(session, "cache_read_tokens", 0),
-                cache_write_tokens=getattr(session, "cache_write_tokens", 0),
-                # Per-session settings the user may have customized — carry them over
-                # so the duplicate behaves identically until further edits. Compression
-                # anchor + last_prompt_tokens are intentionally NOT carried — those
-                # re-derive on the next turn.
-                personality=session.personality,
-                enabled_toolsets=getattr(session, "enabled_toolsets", None),
-                context_length=getattr(session, "context_length", None),
-                threshold_tokens=getattr(session, "threshold_tokens", None),
-                truncation_watermark=getattr(session, "truncation_watermark", None),
-                truncation_boundary=getattr(session, "truncation_boundary", None),
-                # context_messages is the authoritative model-facing prefix — must be
-                # deepcopied so the duplicate has its own independent context that won't
-                # be mutated when the original session's context changes (#2914).
-                context_messages=copy.deepcopy(getattr(session, "context_messages", None) or []),
-                # Gateway routing — if the user customized routing for this session,
-                # the duplicate should behave identically.
-                gateway_routing=copy.deepcopy(getattr(session, "gateway_routing", None)),
-                gateway_routing_history=copy.deepcopy(getattr(session, "gateway_routing_history", None) or []),
-                # Preserve LLM-generated title flag so we don't regenerate title on duplicate.
-                llm_title_generated=getattr(session, "llm_title_generated", False),
-                manual_title=getattr(session, "manual_title", False),
-                # Composer draft — preserve per-session draft state.
-                composer_draft=copy.deepcopy(getattr(session, "composer_draft", None) or {}),
-                # Context engine state — preserve so the duplicate's context engine
-                # starts from the same point as the original.
-                context_engine=getattr(session, "context_engine", None),
-                context_engine_state=copy.deepcopy(getattr(session, "context_engine_state", None) or {}),
-                created_at=time.time(),
-                updated_at=time.time(),
-            )
+                # Deep-copy mutable lists so the duplicate is *actually* independent.
+                # `Session.__init__` does `self.messages = messages or []` — plain
+                # assignment, no copy. Without deepcopy, both sessions share the same
+                # list object in memory; appending to one mutates the other.
+                # Items inside `messages` are dicts with mutable values (tool_calls,
+                # content arrays), so a shallow `list(...)` is not enough.
+                copied_session = Session(
+                    session_id=uuid.uuid4().hex[:12],
+                    # Defensive: legacy sessions may have title=None on disk; fall back to 'Untitled'
+                    # so `+ " (copy)"` doesn't TypeError.
+                    title=(session.title or "Untitled") + " (copy)",
+                    workspace=session.workspace,
+                    model=session.model,
+                    model_provider=session.model_provider,
+                    messages=copy.deepcopy(session.messages),
+                    tool_calls=copy.deepcopy(session.tool_calls),
+                    # Reset ephemeral / per-session-instance flags. Duplicating an
+                    # archived conversation should produce a visible (un-archived)
+                    # copy; pinned status doesn't transfer either.
+                    pinned=False,
+                    archived=False,
+                    project_id=session.project_id,
+                    profile=session.profile,
+                    input_tokens=session.input_tokens,
+                    output_tokens=session.output_tokens,
+                    estimated_cost=session.estimated_cost,
+                    cache_read_tokens=getattr(session, "cache_read_tokens", 0),
+                    cache_write_tokens=getattr(session, "cache_write_tokens", 0),
+                    # Per-session settings the user may have customized — carry them over
+                    # so the duplicate behaves identically until further edits. Compression
+                    # anchor + last_prompt_tokens are intentionally NOT carried — those
+                    # re-derive on the next turn.
+                    personality=session.personality,
+                    enabled_toolsets=getattr(session, "enabled_toolsets", None),
+                    context_length=getattr(session, "context_length", None),
+                    threshold_tokens=getattr(session, "threshold_tokens", None),
+                    truncation_watermark=getattr(session, "truncation_watermark", None),
+                    truncation_boundary=getattr(session, "truncation_boundary", None),
+                    # context_messages is the authoritative model-facing prefix — must be
+                    # deepcopied so the duplicate has its own independent context that won't
+                    # be mutated when the original session's context changes (#2914).
+                    context_messages=copy.deepcopy(getattr(session, "context_messages", None) or []),
+                    # Gateway routing — if the user customized routing for this session,
+                    # the duplicate should behave identically.
+                    gateway_routing=copy.deepcopy(getattr(session, "gateway_routing", None)),
+                    gateway_routing_history=copy.deepcopy(getattr(session, "gateway_routing_history", None) or []),
+                    # Preserve LLM-generated title flag so we don't regenerate title on duplicate.
+                    llm_title_generated=getattr(session, "llm_title_generated", False),
+                    manual_title=getattr(session, "manual_title", False),
+                    # Composer draft — preserve per-session draft state.
+                    composer_draft=copy.deepcopy(getattr(session, "composer_draft", None) or {}),
+                    # Context engine state — preserve so the duplicate's context engine
+                    # starts from the same point as the original.
+                    context_engine=getattr(session, "context_engine", None),
+                    context_engine_state=copy.deepcopy(getattr(session, "context_engine_state", None) or {}),
+                    created_at=time.time(),
+                    updated_at=time.time(),
+                )
 
-            with LOCK:
-                SESSIONS[copied_session.session_id] = copied_session
-                SESSIONS.move_to_end(copied_session.session_id)
-                _evict_sessions_over_cap()  # #4765: safe LRU eviction (never active/unsaved)
-            # Persist immediately. The pre-PR flow (/api/session/new + /api/session/rename)
-            # accidentally avoided this because `/api/session/rename` calls `s.save()`.
-            # Without this explicit save, the duplicate is in-memory only — if the user
-            # refreshes before sending a turn, the duplicate vanishes.
-            copied_session.save()
-            publish_session_list_changed(
-                "session_duplicate",
-                profile=getattr(copied_session, "profile", None),
-                session_id=getattr(copied_session, "session_id", None),
-            )
+                persist_webui_child_session(
+                    copied_session,
+                    getattr(copied_session, "context_messages", None)
+                    or copied_session.messages,
+                )
+                with LOCK:
+                    SESSIONS[copied_session.session_id] = copied_session
+                    SESSIONS.move_to_end(copied_session.session_id)
+                    _evict_sessions_over_cap()  # #4765: safe LRU eviction (never active/unsaved)
+                publish_session_list_changed(
+                    "session_duplicate",
+                    profile=getattr(copied_session, "profile", None),
+                    session_id=getattr(copied_session, "session_id", None),
+                )
 
-            return j(handler, {"session": copied_session.compact() | {"messages": copied_session.messages}})
+                return j(handler, {"session": copied_session.compact() | {"messages": copied_session.messages}})
+        except WebUISessionDBBridgeError as exc:
+            return bad(handler, str(exc), 503)
         except Exception as e:
             return bad(handler, str(e))
 
@@ -14842,6 +14855,12 @@ def handle_post(handler, parsed) -> bool:
         source = _load_branch_source_or_refuse(handler, body["session_id"])
         if source is None:
             return True
+        if webui_gateway_chat_enabled(load_settings()):
+            return bad(
+                handler,
+                "Durable WebUI branching is not available in gateway mode.",
+                501,
+            )
 
         keep_count = body.get("keep_count")
         if keep_count is not None:
@@ -14860,84 +14879,110 @@ def handle_post(handler, parsed) -> bool:
         if custom_title:
             custom_title = str(custom_title).strip()[:80] or None
 
-        # Build messages slice in the same coordinate space exposed by GET
-        # /api/session so frontend keep_count values from merged messaging
-        # transcripts do not silently become full sidecar copies.
-        try:
-            if not getattr(source, "_branch_source_readonly", False): source.save()
-        except Exception:
-            pass
-        cli_meta = _lookup_cli_session_metadata(source.session_id) if _session_requires_cli_metadata_lookup(source) else {}
-        is_messaging_session = _is_messaging_session_record(source) or _is_messaging_session_record(cli_meta)
-        cli_messages = get_cli_session_messages(source.session_id) if is_messaging_session else []
-        source_messages = (
-            _merged_session_messages_for_display(source, cli_messages)
-            if is_messaging_session and cli_messages
-            else list(source.messages or [])
-        )
-        if keep_count is not None:
-            forked_messages = source_messages[:keep_count]
-        else:
-            forked_messages = list(source_messages)
+        # Snapshot and persist the source and child under one per-session lock.
+        # This prevents a concurrent WebUI turn from changing the context between
+        # the JSON fork calculation and the durable child seed.
+        with _get_session_agent_lock(source.session_id):
+            if not getattr(source, "_branch_source_readonly", False):
+                latest_source = get_session(source.session_id)
+                if latest_source is None:
+                    return bad(handler, "Session not found", 404)
+                source = latest_source
+                try:
+                    source.save()
+                except Exception:
+                    pass
 
-        # Derive title
-        if custom_title:
-            branch_title = custom_title
-        else:
-            source_title = source.title or "Untitled"
-            branch_title = f"{source_title} (fork)"
+            # Build the display slice in the same coordinate space exposed by
+            # GET /api/session so frontend keep_count values from merged
+            # messaging transcripts do not silently become full copies.
+            cli_meta = (
+                _lookup_cli_session_metadata(source.session_id)
+                if _session_requires_cli_metadata_lookup(source)
+                else {}
+            )
+            is_messaging_session = _is_messaging_session_record(source) or _is_messaging_session_record(cli_meta)
+            cli_messages = get_cli_session_messages(source.session_id) if is_messaging_session else []
+            source_messages = (
+                _merged_session_messages_for_display(source, cli_messages)
+                if is_messaging_session and cli_messages
+                else list(source.messages or [])
+            )
+            if keep_count is not None:
+                forked_messages = source_messages[:keep_count]
+            else:
+                forked_messages = list(source_messages)
 
-        # Create new session inheriting workspace/model/profile
-        from api.session_ops import truncate_context_for_display_keep
+            if custom_title:
+                branch_title = custom_title
+            else:
+                source_title = source.title or "Untitled"
+                branch_title = f"{source_title} (fork)"
 
-        fork_keep = keep_count if keep_count is not None else len(source_messages)
-        forked_context = truncate_context_for_display_keep(
-            getattr(source, "context_messages", None),
-            source_messages,
-            fork_keep,
-        )
-        branch = Session(
-            workspace=source.workspace,
-            model=source.model,
-            model_provider=getattr(source, "model_provider", None),
-            profile=getattr(source, "profile", None),
-            title=branch_title,
-            messages=forked_messages,
-            project_id=getattr(source, "project_id", None),
-            personality=getattr(source, "personality", None),
-            enabled_toolsets=getattr(source, "enabled_toolsets", None),
-            context_length=getattr(source, "context_length", None),
-            threshold_tokens=getattr(source, "threshold_tokens", None),
-            # context_messages — truncated to fork prefix (not full parent copy)
-            context_messages=copy.deepcopy(forked_context),
-            # Gateway routing — inherit from source
-            gateway_routing=copy.deepcopy(getattr(source, "gateway_routing", None)),
-            # Context engine — inherit state so branch's context engine starts correctly
-            context_engine=getattr(source, "context_engine", None),
-            context_engine_state=copy.deepcopy(getattr(source, "context_engine_state", None) or {}),
-            parent_session_id=source.session_id,
-            session_source="fork",
-        )
-        with LOCK:
-            SESSIONS[branch.session_id] = branch
-            SESSIONS.move_to_end(branch.session_id)
-            _evict_sessions_over_cap()  # #4765: safe LRU eviction (never active/unsaved)
+            # The child DB receives the same model-facing context that the
+            # sidecar sends on the next turn. Archived source rows are never
+            # copied into the child.
+            from api.session_ops import truncate_context_for_display_keep
 
-        # Persist only if there are messages (matches new_session pattern)
-        if forked_messages:
-            branch.save()
-            publish_session_list_changed(
-                "session_branch",
-                profile=getattr(branch, "profile", None),
-                session_id=getattr(branch, "session_id", None),
+            source_context = list(getattr(source, "context_messages", None) or [])
+            if not source_context:
+                source_context = list(source_messages)
+            fork_keep = keep_count if keep_count is not None else len(source_messages)
+            forked_context = truncate_context_for_display_keep(
+                source_context,
+                source_messages,
+                fork_keep,
+            )
+            if fork_keep > 0 and not forked_context:
+                forked_context = list(forked_messages)
+
+            branch = Session(
+                workspace=source.workspace,
+                model=source.model,
+                model_provider=getattr(source, "model_provider", None),
+                profile=getattr(source, "profile", None),
+                title=branch_title,
+                messages=forked_messages,
+                project_id=getattr(source, "project_id", None),
+                personality=getattr(source, "personality", None),
+                enabled_toolsets=getattr(source, "enabled_toolsets", None),
+                context_length=getattr(source, "context_length", None),
+                threshold_tokens=getattr(source, "threshold_tokens", None),
+                # context_messages — truncated to the fork prefix, not the
+                # parent's archived display history.
+                context_messages=copy.deepcopy(forked_context),
+                gateway_routing=copy.deepcopy(getattr(source, "gateway_routing", None)),
+                context_engine=getattr(source, "context_engine", None),
+                context_engine_state=copy.deepcopy(getattr(source, "context_engine_state", None) or {}),
+                parent_session_id=source.session_id,
+                session_source="fork",
             )
 
+            try:
+                persist_webui_child_session(
+                    branch,
+                    forked_context,
+                    source_session=source,
+                    parent_session_id=source.session_id,
+                    source_context=source_context,
+                )
+            except WebUISessionDBBridgeError as exc:
+                return bad(handler, str(exc), 503)
+            with LOCK:
+                SESSIONS[branch.session_id] = branch
+                SESSIONS.move_to_end(branch.session_id)
+                _evict_sessions_over_cap()  # #4765: safe LRU eviction (never active/unsaved)
+
+        publish_session_list_changed(
+            "session_branch",
+            profile=getattr(branch, "profile", None),
+            session_id=getattr(branch, "session_id", None),
+        )
         return j(handler, {
             "session_id": branch.session_id,
             "title": branch_title,
             "parent_session_id": source.session_id,
         })
-
     if parsed.path == "/api/session/compress/start":
         return _handle_session_compress_start(handler, body)
 

@@ -417,6 +417,10 @@ def test_branch_route_allows_not_claimable_cron_sessions_to_fork(monkeypatch):
         session_source="other",
     )
     monkeypatch.setattr(routes, "_claim_or_synthesize_cli_session", lambda _sid: (source, "not_claimable"))
+    # This route-level test exercises read-only cron eligibility and does not
+    # own a temporary Hermes Agent state.db. Durable child-session persistence
+    # is covered by the dedicated state.db bridge tests.
+    monkeypatch.setattr(routes, "persist_webui_child_session", lambda *args, **kwargs: None)
     cap = _capture_route(monkeypatch)
     routes.handle_post(handler, urlparse("/api/session/branch"))
     assert "bad" not in cap
@@ -444,6 +448,144 @@ def test_branch_route_keeps_404_for_truly_missing_sessions(monkeypatch):
     cap = _capture_route(monkeypatch)
     routes.handle_post(handler, urlparse("/api/session/branch"))
     assert cap["bad"] == ("Session not found", 404)
+
+
+def test_branch_route_passes_aligned_context_to_durable_bridge(monkeypatch):
+    """A fork seeds its model context, not the full display transcript."""
+    from collections import OrderedDict
+
+    handler = _FakeHandler()
+    source_messages = [
+        {"role": "user", "content": "turn-1", "timestamp": 1.0},
+        {"role": "assistant", "content": "reply-1", "timestamp": 2.0},
+        {"role": "user", "content": "turn-2", "timestamp": 3.0},
+        {"role": "assistant", "content": "reply-2", "timestamp": 4.0},
+        {"role": "user", "content": "turn-3", "timestamp": 5.0},
+        {"role": "assistant", "content": "reply-3", "timestamp": 6.0},
+    ]
+    source = routes.Session(
+        session_id="source-context",
+        title="Source",
+        workspace=".",
+        model="test-model",
+        messages=source_messages,
+        context_messages=source_messages[:4],
+    )
+    source._branch_source_readonly = True
+    captured = {}
+
+    monkeypatch.setattr(routes, "_check_csrf", lambda _handler: True)
+    monkeypatch.setattr(routes, "read_body", lambda _handler: {
+        "session_id": source.session_id,
+        "keep_count": 4,
+    })
+    monkeypatch.setattr(routes, "_load_branch_source_or_refuse", lambda _handler, _sid: source)
+    monkeypatch.setattr(routes, "webui_gateway_chat_enabled", lambda *_args: False)
+    monkeypatch.setattr(routes, "SESSIONS", OrderedDict())
+
+    def capture(child, seed, **kwargs):
+        captured["child"] = child
+        captured["seed"] = list(seed)
+        captured["kwargs"] = kwargs
+
+    monkeypatch.setattr(routes, "persist_webui_child_session", capture)
+    cap = _capture_route(monkeypatch)
+    routes.handle_post(handler, urlparse("/api/session/branch"))
+
+    assert "bad" not in cap
+    assert captured["seed"] == source_messages[:4]
+    assert captured["kwargs"]["parent_session_id"] == source.session_id
+    assert captured["kwargs"]["source_context"] == source_messages[:4]
+
+
+def test_duplicate_route_passes_full_model_context_without_parent_link(monkeypatch):
+    """Duplicate persistence is independent but still durable."""
+    from collections import OrderedDict
+
+    handler = _FakeHandler()
+    source = routes.Session(
+        session_id="source-duplicate",
+        title="Source",
+        workspace=".",
+        model="test-model",
+        messages=[{"role": "user", "content": "display"}],
+        context_messages=[{"role": "user", "content": "compressed-context"}],
+    )
+    captured = {}
+
+    monkeypatch.setattr(routes, "_check_csrf", lambda _handler: True)
+    monkeypatch.setattr(routes, "read_body", lambda _handler: {"session_id": source.session_id})
+    monkeypatch.setattr(routes, "webui_gateway_chat_enabled", lambda *_args: False)
+    monkeypatch.setattr(routes.Session, "load", staticmethod(lambda _sid: source))
+    monkeypatch.setattr(routes, "SESSIONS", OrderedDict())
+
+    def capture(child, seed, **kwargs):
+        captured["seed"] = list(seed)
+        captured["kwargs"] = kwargs
+
+    monkeypatch.setattr(routes, "persist_webui_child_session", capture)
+    cap = _capture_route(monkeypatch)
+    routes.handle_post(handler, urlparse("/api/session/duplicate"))
+
+    assert "bad" not in cap
+    assert captured["seed"] == source.context_messages
+    assert "parent_session_id" not in captured["kwargs"]
+
+
+def test_branch_route_refuses_gateway_mode_before_durable_persistence(monkeypatch):
+    """Gateway branches must not write a local WebUI state.db."""
+    handler = _FakeHandler()
+    source = routes.Session(
+        session_id="gateway-branch",
+        title="Gateway source",
+        workspace=".",
+        model="test-model",
+        messages=[{"role": "user", "content": "hello"}],
+    )
+    persisted = []
+
+    monkeypatch.setattr(routes, "_check_csrf", lambda _handler: True)
+    monkeypatch.setattr(routes, "read_body", lambda _handler: {"session_id": source.session_id})
+    monkeypatch.setattr(routes, "_load_branch_source_or_refuse", lambda _handler, _sid: source)
+    monkeypatch.setattr(routes, "webui_gateway_chat_enabled", lambda *_args: True)
+    monkeypatch.setattr(routes, "persist_webui_child_session", lambda *args, **kwargs: persisted.append(args))
+    cap = _capture_route(monkeypatch)
+
+    routes.handle_post(handler, urlparse("/api/session/branch"))
+
+    assert cap["bad"] == (
+        "Durable WebUI branching is not available in gateway mode.",
+        501,
+    )
+    assert persisted == []
+
+
+def test_duplicate_route_refuses_gateway_mode_before_persisting_child(monkeypatch):
+    """Gateway duplicates must not fall back to the local SessionDB bridge."""
+    handler = _FakeHandler()
+    loaded = []
+    persisted = []
+
+    monkeypatch.setattr(routes, "_check_csrf", lambda _handler: True)
+    monkeypatch.setattr(routes, "read_body", lambda _handler: {"session_id": "gateway-duplicate"})
+    monkeypatch.setattr(routes, "_session_is_subagent_view_only", lambda _sid: False)
+    monkeypatch.setattr(routes, "webui_gateway_chat_enabled", lambda *_args: True)
+    monkeypatch.setattr(
+        routes.Session,
+        "load",
+        staticmethod(lambda sid: loaded.append(sid)),
+    )
+    monkeypatch.setattr(routes, "persist_webui_child_session", lambda *args, **kwargs: persisted.append(args))
+    cap = _capture_route(monkeypatch)
+
+    routes.handle_post(handler, urlparse("/api/session/duplicate"))
+
+    assert cap["bad"] == (
+        "Durable WebUI duplication is not available in gateway mode.",
+        501,
+    )
+    assert loaded == []
+    assert persisted == []
 
 
 # ── Session model ──────────────────────────────────────────────────────────────

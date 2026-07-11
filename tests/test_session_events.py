@@ -1,4 +1,5 @@
 import queue
+import re
 from pathlib import Path
 
 
@@ -41,14 +42,18 @@ def test_session_events_publish_for_minimal_sidebar_mutations():
     assert 'if worktree_info:\n            publish_session_list_changed(\n                "session_new",' in ROUTES
     assert "was_hidden_empty_session = _is_hidden_empty_session(s)" in ROUTES
     assert 'if was_hidden_empty_session:\n        publish_session_list_changed(\n            "session_new",' in ROUTES
-    assert 'publish_session_list_changed(\n                "session_duplicate",' in ROUTES
+    assert re.search(
+        r'publish_session_list_changed\(\s*"session_duplicate",', ROUTES
+    )
     assert 'publish_session_list_changed(\n            "session_rename",' in ROUTES
     assert '_persist_generated_session_title(s, next_title, event_reason="session_title_regenerate")' in ROUTES
     assert "session_id=sid" in ROUTES
     assert 'event_profile = getattr(get_session(sid, metadata_only=True), "profile", None)' in ROUTES
     assert "Failed to resolve profile for deleted session" in ROUTES
     assert '_publish_session_list_changed("session_delete", profile=event_profile)' in ROUTES
-    assert 'publish_session_list_changed(\n                "session_branch",' in ROUTES
+    assert re.search(
+        r'publish_session_list_changed\(\s*"session_branch",', ROUTES
+    )
     assert 'publish_session_list_changed(\n            "session_pin",' in ROUTES
     assert 'publish_session_list_changed(\n            "session_archive",' in ROUTES
     assert 'publish_session_list_changed(\n            "session_move",' in ROUTES
