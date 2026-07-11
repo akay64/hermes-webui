@@ -273,6 +273,29 @@ block. If the browser disconnects mid-stream, the daemon thread runs to completi
 then cleans up. The queue fills and the put_nowait() calls fail silently (queue.Full
 is caught).
 
+#### 4.3.1 Settled transcript windowing
+
+The SSE `done` payload is intentionally a full terminal snapshot so the browser can
+reconcile canonical session metadata, usage, and the completed turn. It is not always
+the correct display payload: a session may already be loaded through the paginated
+`/api/session?msg_limit=...` contract, especially when transcript virtualization is
+disabled.
+
+When the browser's current session is truncated, `sessions.js` requests a bounded
+settled window from the same `/api/session` endpoint before applying the terminal
+snapshot. The server remains authoritative for visible-row counting, tool-result
+carry-through, `_messages_offset`, and activity-scene hydration. `messages.js` merges
+that bounded window with the terminal metadata and preserves the existing pagination
+cursor. SSE recovery uses the same path.
+
+The terminal paths do not promote `_messageRenderWindowSize` to the full transcript.
+Explicit history actions such as loading older messages, session-start navigation,
+export, edit, and regenerate may still request or render the full session. If the
+bounded refresh fails, the browser keeps its bounded in-flight/local transcript rather
+than replacing it with the full SSE payload. This keeps the visible transcript and
+the pagination state coherent without changing the experimental virtualization
+preference or the Agent repository.
+
 Fallback sync endpoint: POST /api/chat still exists and holds the connection open until
 the agent finishes. The frontend never uses it but it can be useful for debugging.
 
@@ -1268,6 +1291,17 @@ failure removes partial child state and returns an error instead of leaving a
 JSON-only child. Empty branches are persisted as real empty sessions. Gateway
 mode is explicitly deferred because the remote Agent owns the authoritative
 database there; exact sidecar reconstruction remains tracked separately.
+
+### July 2026: Bounded Settled Transcript Windows
+
+The WebUI's terminal `done` event carries a full session snapshot, but the browser
+now preserves an already-paginated session window when applying that snapshot. It
+refreshes the canonical bounded tail through `/api/session?msg_limit=...`, retaining
+server-owned offsets, tool-result rows, activity metadata, and the newly completed
+turn without rendering thousands of older messages after every completion. SSE error
+and `stream_end` recovery use the same bounded request. Explicit history-loading
+actions remain unchanged, and a failed refresh keeps the bounded local/in-flight view
+instead of promoting the full terminal payload.
 
 ### Sprint 1 (March 30, 2026): Bug Fixes, Arch Foundations, First Tests
 
