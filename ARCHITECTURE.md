@@ -373,8 +373,31 @@ automatic compression boundary for writeback only when that signal is true.
 With `abort_on_summary_failure: true`, an unsuccessful summary remains a no-op
 for the conversation rather than triggering archival or a context rewrite.
 
-The legacy `compression.in_place: false` rotation path, branch/duplicate
-database indexing, and exact sidecar reconstruction are outside this contract.
+#### 4.4.2 Durable Local WebUI Branches and Duplicates
+
+The in-process WebUI branch and duplicate routes now use a small local
+`SessionDB` bridge so a successful JSON child is never created without a
+corresponding durable session row.
+
+- A branch ensures the source row exists, creates a child row with
+  `parent_session_id`, and leaves the source session ongoing.
+- A duplicate creates an independent child row without a parent link.
+- Both operations seed only the child model-facing `context_messages` as active
+  rows. Archived/compacted source rows remain in the source session and are not
+  copied into the child.
+- The source-session lock is held while the display/context snapshot is taken,
+  the DB child is created, and the child sidecar is saved.
+- Database failure or sidecar failure fails closed. Any partial child row is
+  removed before the route returns an error; the JSON child is published only
+  after the DB seed succeeds.
+- Empty branches are durable session rows with an empty active context, so the
+  returned child ID is not an in-memory-only session.
+
+This bridge is local-WebUI-only. Gateway-backed WebUI branch/duplicate requests
+return an explicit unsupported response until the remote Agent API can own the
+same lifecycle. The legacy `compression.in_place: false` rotation path and
+exact sidecar reconstruction remain separate follow-ups.
+
 The Agent's low-level compression-lock compatibility fallback may also proceed
 without that lock when a long-lived process has version-skewed modules; this is
 separate from the durable commit guard. Restarting the process after an Agent
@@ -384,7 +407,9 @@ prevents an uncommitted in-place result from being reported as successful.
 Regression coverage includes the committed-versus-uncommitted compression
 signal, manual compression recovery/watermark behavior, and DB-backed manual
 compression fakes covering seed, archive, summary-abort, and commit-failure
-paths.
+paths, plus branch/duplicate child-session tests covering active-context
+seeding, parent linkage, compressed sources, gateway refusal, and rollback on
+persistence failure.
 
 ### 4.5 Approval System Integration
 
@@ -793,6 +818,7 @@ authored value that is equal to its expanded snapshot value.
 | B13 | Low      | No CORS headers                                      | Open             | Phase H |
 | B14 | Low      | No keyboard shortcut for new chat                    | FIXED Sprint 3   | Cmd/Ctrl+K triggers newSession() from anywhere |
 | B15 | Critical | Manual compression could publish a compressed sidecar without a durable DB commit | FIXED July 2026 | DB-backed in-place lifecycle, per-session serialization, commit guard, and DB-first sidecar writeback |
+| B16 | Critical | WebUI branch/duplicate could create a JSON child with no durable state.db session or inherited active context | FIXED July 2026 | Profile-scoped child bridge, active-context seeding, DB parent linkage for branches, locking, and fail-closed compensation |
 | TD1 | Critical | Env vars are process-global (concurrent request bug) | PARTIAL Sprint 5 | Thread-local _set_thread_env() added. Per-session lock from Sprint 4. Process-level env still written as fallback. Full fix needs terminal tool to read thread-local. |
 | TD2 | High     | SESSIONS cache: no eviction, locking missing         | FIXED Sprint 5   | OrderedDict + LRU cap 100 + move_to_end on access. LOCK from Sprint 1. Complete. |
 | TD3 | High     | No test coverage                                     | PARTIAL Sprint 1 | 19 HTTP integration tests added; unit tests pending Phase A split |
@@ -1224,9 +1250,24 @@ sidecar is published. Automatic in-place compression uses the same Agent-side
 archive/commit signal for WebUI writeback.
 
 This change intentionally targets `compression.in_place: true` with
-`abort_on_summary_failure: true`. Legacy session rotation, branch/duplicate
-database indexing, and full sidecar reconstruction after deletion or corruption
-remain separate follow-up work.
+`abort_on_summary_failure: true`. Legacy session rotation and full sidecar
+reconstruction after deletion or corruption remain separate follow-up work.
+
+### July 2026: Durable Local WebUI Branches and Duplicates
+
+WebUI branch and duplicate operations now persist their child lifecycle in the
+profile-specific Hermes Agent `state.db` before publishing the child JSON
+sidecar. Branches materialize a missing parent row and record
+`parent_session_id`; duplicates remain parentless by design. Both seed only the
+model-facing `context_messages` as active child rows, so a compressed session
+passes its summary and protected tail forward without copying archived source
+history.
+
+The source session is locked during snapshot and child creation. DB or sidecar
+failure removes partial child state and returns an error instead of leaving a
+JSON-only child. Empty branches are persisted as real empty sessions. Gateway
+mode is explicitly deferred because the remote Agent owns the authoritative
+database there; exact sidecar reconstruction remains tracked separately.
 
 ### Sprint 1 (March 30, 2026): Bug Fixes, Arch Foundations, First Tests
 
