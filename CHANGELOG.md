@@ -5,6 +5,8 @@
 
 ### Fixed
 
+- **The agent no longer tells you a stored credential is "wrong" when it's just masked.** Secrets are redacted (`***`, `sk-abc…xyz1`) before the model sees them, but nothing told the model that masking was intentional — so it sometimes read a masked API key or password and reported it as a typo or a placeholder. The WebUI progress-guidance prompt now explains that redacted credential fields are deliberate masking, so the agent stops flagging correctly-stored secrets as errors. Thanks @mvanhorn. (#5927, #5871)
+
 - **Stale "unread" dot no longer lingers on a session after you open it.** Visiting a session now clears its sidebar unread indicator across the paths that previously left it stuck — the same-session reselect, the metadata-arrival ack, and the post-message-load re-sync — while a completion that lands in a genuinely hidden/background tab correctly stays unread. It also stops a phantom unread/streaming indicator from appearing when you switch from a busy session to an idle one (the idle session's streaming flags are now reset from its own metadata before the sidebar repaint, instead of inheriting the previous session's busy state). Thanks @neaucode-bot. (#5917, #4946)
 
 - **Plugin-provided model providers route correctly when set as the default.** A model from a plugin-only provider (e.g. a `@plugin:model` route) was surfaced in the catalog but, when that plugin provider was also the configured default, the request dropped the `@plugin:` routing hint and went to the wrong backend. Provider-hint resolution now applies plugin routing before the configured-provider bare-passthrough. Thanks @alexfoxtm. (#5909, #5461)
