@@ -11,6 +11,7 @@ import pytest
 REPO = Path(__file__).resolve().parents[1]
 SESSIONS_JS = (REPO / "static" / "sessions.js").read_text(encoding="utf-8")
 MESSAGES_JS = (REPO / "static" / "messages.js").read_text(encoding="utf-8")
+UI_JS = (REPO / "static" / "ui.js").read_text(encoding="utf-8")
 NODE = shutil.which("node")
 
 pytestmark = pytest.mark.skipif(NODE is None, reason="node is required for settled-window runtime tests")
@@ -106,25 +107,29 @@ eval(extractFunction('_settledSessionMessageWindowLimit'));
 eval(extractFunction('_settledSessionMessageWindowUrl'));
 eval(extractFunction('_fetchSettledSessionMessageWindow'));
 (async()=>{
-  const bounded = await _fetchSettledSessionMessageWindow('sid-1', {message_count: 103}, {});
-  _messagesTruncated = false;
-  const full = await _fetchSettledSessionMessageWindow('sid-1', {message_count: 1000}, {});
-  console.log(JSON.stringify({bounded, full, calls}));
+const bounded = await _fetchSettledSessionMessageWindow('sid-1', {message_count: 103}, {});
+_messagesTruncated = false;
+const full = await _fetchSettledSessionMessageWindow('sid-1', {message_count: 1000}, {});
+const forced = await _fetchSettledSessionMessageWindow('sid-1', null, {reserveNewTurn: true, forceBounded: true});
+console.log(JSON.stringify({bounded, full, forced, calls}));
 })().catch(err=>{ console.error(err.stack || err); process.exit(1); });
 """
     )
 
     assert outcome["bounded"]["_messages_offset"] == 70
     assert outcome["full"] is None
-    assert len(outcome["calls"]) == 1
+    assert outcome["forced"]["_messages_offset"] == 70
+    assert len(outcome["calls"]) == 2
     assert "session_id=sid-1&messages=1&resolve_model=0&msg_limit=33" in outcome["calls"][0]["url"]
+    assert "session_id=sid-1&messages=1&resolve_model=0&msg_limit=30" in outcome["calls"][1]["url"]
     assert outcome["calls"][0]["options"] == {"timeoutMs": 120000}
+    assert outcome["calls"][1]["options"] == {"timeoutMs": 120000}
 
 
 def test_done_and_recovery_paths_do_not_expand_the_render_window():
     compact = "".join(MESSAGES_JS.split())
     assert "_fetchSettledSessionMessageWindow(activeSid,completedSession)" in compact
-    assert "_settledSessionMessageWindowUrl(activeSid,null,{reserveNewTurn:true})" in compact
+    assert "_settledSessionMessageWindowUrl(activeSid,null,{reserveNewTurn:true,forceBounded:true})" in compact
     assert "_messagesTruncated=!!session._messages_truncated" in compact
     assert "_messageRenderWindowSize=Math.max(typeof _currentMessageRenderWindowSize" not in compact
 
@@ -141,3 +146,12 @@ def test_settled_window_helpers_and_cross_module_callers_are_present():
     assert "function _settledSessionMessageWindowLimit" in SESSIONS_JS
     assert "async function _fetchSettledSessionMessageWindow" in SESSIONS_JS
     assert "_fetchSettledSessionMessageWindow(activeSid,completedSession)" in MESSAGES_JS
+
+
+def test_reconnect_refresh_uses_a_bounded_session_window():
+    start = UI_JS.index("async function refreshSession()")
+    end = UI_JS.index("// ── Update banner", start)
+    body = "".join(UI_JS[start:end].split())
+    assert "_messageReloadLimitForSession(sid)" in body
+    assert "messages=1&resolve_model=0&msg_limit=${encodeURIComponent" in body
+    assert "api(`/api/session?session_id=${encodeURIComponent(S.session.session_id)}`)" not in body

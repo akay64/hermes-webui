@@ -734,7 +734,7 @@ def test_frontend_subscribes_with_known_count_and_handles_session_updated():
     assert "S.messages.length" not in knc_src
     # (b) the session-updated listener routes through the swap-in-place path.
     su_ix = js.index("addEventListener('session-updated'")
-    su_src = js[su_ix:su_ix + 1400]
+    su_src = js[su_ix:su_ix + 1800]
     assert "keepStaleUntilLoaded: true" in su_src or "keepStaleUntilLoaded:true" in su_src
     assert "loadSession(" in su_src
     # Idle-only: must bail when a live turn is rendering (that path owns its own
@@ -774,4 +774,3 @@ def test_loadsession_idle_cleanup_does_not_clobber_concurrent_live_stream():
     assert reread_ix != -1 and branch_ix != -1 and reread_ix < branch_ix, (
         "race-guard re-read must precede the attach/idle branch"
     )
-
