@@ -434,10 +434,10 @@ def test_active_done_marks_viewed_without_setting_unread_marker():
 def test_hidden_active_done_still_updates_current_pane_but_not_read_state():
     done_block = _done_block()
 
-    active_const_idx = done_block.find("const isActiveSession=_isSessionCurrentPane(activeSid);")
+    active_const_idx = done_block.find("let isActiveSession=_isSessionCurrentPane(activeSid);")
     viewed_const_idx = done_block.find("const isSessionViewed=_isSessionActivelyViewed(activeSid);")
     active_guard_idx = done_block.find("if(isActiveSession){", viewed_const_idx)
-    session_update_idx = done_block.find("S.session=d.session", active_guard_idx)
+    session_update_idx = done_block.find("S.session=_settledSession", active_guard_idx)
     render_idx = done_block.find("renderMessages(", active_guard_idx)
     load_dir_idx = done_block.find("preservePreview", active_guard_idx)
     mark_viewed_idx = done_block.find("if(isSessionViewed) _markSessionViewed(completedSid", active_guard_idx)
@@ -445,7 +445,7 @@ def test_hidden_active_done_still_updates_current_pane_but_not_read_state():
     assert active_const_idx != -1, "done handler must compute active/current pane separately"
     assert viewed_const_idx != -1, "done handler must still compute visible/focused read state"
     assert active_const_idx < viewed_const_idx
-    assert session_update_idx != -1, "active hidden completion must still refresh S.session"
+    assert session_update_idx != -1, "active hidden completion must still refresh the settled S.session"
     assert render_idx != -1, "active hidden completion must still render the final assistant response"
     assert load_dir_idx != -1, "active hidden completion must keep normal active-session finalization"
     assert mark_viewed_idx != -1, "read-state write must stay gated by visible/focused viewing"
