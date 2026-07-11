@@ -8230,10 +8230,16 @@ function _syncHermesPanelSessionActions(){
   const visibleMessages=hasSession?(S.messages||[]).filter(m=>m&&m.role&&m.role!=='tool').length:0;
   const title=hasSession?(S.session.title||t('untitled')):t('active_conversation_none');
   const meta=$('hermesSessionMeta');
+  const hasShare=!!(hasSession&&S.session&&S.session.share_token);
   if(meta){
-    meta.textContent=hasSession
-      ? t('active_conversation_meta', title, visibleMessages)
-      : t('active_conversation_none');
+    if(!hasSession){
+      meta.textContent=t('active_conversation_none');
+    }else{
+      const base=t('active_conversation_meta', title, visibleMessages);
+      meta.textContent=hasShare
+        ? `${base} · ${t('share_session_status_active')}`
+        : base;
+    }
   }
   const setDisabled=(id,disabled)=>{
     const el=$(id);
@@ -8243,6 +8249,8 @@ function _syncHermesPanelSessionActions(){
   };
   setDisabled('btnDownload',!hasSession||visibleMessages===0);
   setDisabled('btnExportJSON',!hasSession);
+  setDisabled('btnShareSession',!hasSession||visibleMessages===0);
+  setDisabled('btnStopSharingSession',!hasShare);
   setDisabled('btnClearConvModal',!hasSession||visibleMessages===0);
 }
 
@@ -8368,7 +8376,9 @@ function _appearancePayloadFromUi(){
     theme: ($('settingsTheme')||{}).value || localStorage.getItem('hermes-theme') || 'dark',
     skin: ($('settingsSkin')||{}).value || localStorage.getItem('hermes-skin') || 'default',
     font_size: ($('settingsFontSize')||{}).value || localStorage.getItem('hermes-font-size') || 'default',
-    chat_activity_display_mode: chatActivityModeSel&&chatActivityModeSel.value==='transparent_stream'?'transparent_stream':'compact_worklog',
+    chat_activity_display_mode: chatActivityModeSel&&(chatActivityModeSel.value==='transparent_stream'||chatActivityModeSel.value==='hide_all_activity')
+      ? chatActivityModeSel.value
+      : 'compact_worklog',
     session_jump_buttons: !!($('settingsSessionJumpButtons')||{}).checked,
     session_endless_scroll: !!($('settingsSessionEndlessScroll')||{}).checked,
     auto_scroll_follow: !!($('settingsAutoScrollFollow')||{}).checked,
@@ -8387,7 +8397,7 @@ function _appearancePayloadFromUi(){
 }
 
 function _syncChatActivityDisplayModeControl(mode){
-  const next=mode==='transparent_stream'?'transparent_stream':'compact_worklog';
+  const next=mode==='transparent_stream'||mode==='hide_all_activity' ? mode : 'compact_worklog';
   const select=$('settingsChatActivityDisplayMode');
   if(select) select.value=next;
   document.querySelectorAll('[data-chat-activity-mode]').forEach(btn=>{
@@ -8397,6 +8407,7 @@ function _syncChatActivityDisplayModeControl(mode){
   });
   window._chatActivityDisplayMode=next;
   window._transparentStream=next==='transparent_stream';
+  if(next==='hide_all_activity'&&typeof window._hideLiveActivityForFinalAnswerOnly==='function') window._hideLiveActivityForFinalAnswerOnly();
 }
 
 function _pickChatActivityDisplayMode(mode){
@@ -12372,7 +12383,10 @@ async function saveSettings(andClose){
   body.font_size=fontSize;
   body.session_jump_buttons=!!($('settingsSessionJumpButtons')||{}).checked;
   body.session_endless_scroll=!!($('settingsSessionEndlessScroll')||{}).checked;
-  body.chat_activity_display_mode=(($('settingsChatActivityDisplayMode')||{}).value==='transparent_stream')?'transparent_stream':'compact_worklog';
+  body.chat_activity_display_mode=((($('settingsChatActivityDisplayMode')||{}).value==='transparent_stream')
+    ||(($('settingsChatActivityDisplayMode')||{}).value==='hide_all_activity'))
+    ? ($('settingsChatActivityDisplayMode')||{}).value
+    : 'compact_worklog';
   body.auto_scroll_follow=!!($('settingsAutoScrollFollow')||{}).checked;
   body.render_user_markdown=!!($('settingsRenderUserMarkdown')||{}).checked;
   body.large_text_paste_as_attachment=!!($('settingsLargeTextPasteAsAttachment')||{}).checked;

@@ -2848,6 +2848,31 @@ def _custom_slug_rest_looks_like_host_port(rest: str) -> bool:
     return False
 
 
+def _parse_provider_qualified_model_id(model_id: str) -> tuple[str, str] | None:
+    """Parse WebUI's ``@provider:model`` route hint into ``(model, provider)``.
+
+    The provider segment can contain colons for named custom providers, while
+    the model segment can also contain colons for tags such as ``:free``.
+    Keep this parser shared with ``resolve_model_provider`` so any caller that
+    compares route-hinted model lanes uses the same grammar.
+    """
+    candidate = str(model_id or "").strip()
+    if not candidate.startswith("@") or ":" not in candidate:
+        return None
+    inner = candidate[1:]
+    provider_hint, bare_model = inner.rsplit(":", 1)
+    if provider_hint.startswith("custom:") and provider_hint.count(":") >= 2:
+        _slug_rest = provider_hint[len("custom:"):]
+        if not _custom_slug_rest_looks_like_host_port(_slug_rest):
+            provider_hint, extra = provider_hint.rsplit(":", 1)
+            bare_model = f"{extra}:{bare_model}"
+    elif (provider_hint not in _PROVIDER_MODELS
+            and provider_hint not in _PROVIDER_DISPLAY
+            and not provider_hint.startswith("custom:")):
+        provider_hint, bare_model = inner.split(":", 1)
+    return bare_model, provider_hint
+
+
 def _get_provider_base_url(provider_id):
     """Look up the configured base_url for a provider (e.g. lmstudio).
 
@@ -3085,18 +3110,9 @@ def resolve_model_provider(model_id: str) -> tuple:
     #
     # Exception: ``custom:<ip-or-host>:<port>`` is a single logical slug derived
     # from OpenAI ``base_url`` authority and contains no eaten model segments.
-    if model_id.startswith("@") and ":" in model_id:
-        inner = model_id[1:]
-        provider_hint, bare_model = inner.rsplit(":", 1)
-        if provider_hint.startswith("custom:") and provider_hint.count(":") >= 2:
-            _slug_rest = provider_hint[len("custom:"):]
-            if not _custom_slug_rest_looks_like_host_port(_slug_rest):
-                provider_hint, extra = provider_hint.rsplit(":", 1)
-                bare_model = f"{extra}:{bare_model}"
-        elif (provider_hint not in _PROVIDER_MODELS
-                and provider_hint not in _PROVIDER_DISPLAY
-                and not provider_hint.startswith("custom:")):
-            provider_hint, bare_model = inner.split(":", 1)
+    parsed_provider_hint = _parse_provider_qualified_model_id(model_id)
+    if parsed_provider_hint is not None:
+        bare_model, provider_hint = parsed_provider_hint
         if (
             provider_hint.startswith("custom:")
             and config_base_url
@@ -3371,6 +3387,19 @@ def model_with_provider_context(model_id: str, model_provider: str | None = None
         return model
 
     return f"@{provider}:{model}"
+
+
+def canonical_model_provider_lane(model_id: str, model_provider: str | None = None) -> tuple[str, str | None]:
+    """Return the runtime-resolved model/provider pair used for lane comparisons."""
+    model = str(model_id or "").strip()
+    provider = str(model_provider or "").strip() or None
+    if not model:
+        return "", provider
+    resolved_model, resolved_provider, _ = resolve_model_provider(
+        model_with_provider_context(model, provider)
+    )
+    resolved_provider = str(resolved_provider or "").strip() or None
+    return str(resolved_model or "").strip(), resolved_provider
 
 
 def get_effective_default_model(config_data: dict | None = None) -> str:
@@ -7349,14 +7378,20 @@ def get_available_models(*, prefer_cache: bool = False, force_refresh: bool = Fa
                             _mid = str(_item.get("id") or "").strip()
                             if not _mid or _mid in seen_ids:
                                 continue
-                            _pricing = _item.get("pricing") or {}
-                            try:
-                                _is_free = (
-                                    float(_pricing.get("prompt", "0") or "0") == 0
-                                    and float(_pricing.get("completion", "0") or "0") == 0
-                                )
-                            except (TypeError, ValueError):
-                                _is_free = False
+                            _pricing = _item.get("pricing")
+                            _is_free = False
+                            if (
+                                isinstance(_pricing, dict)
+                                and "prompt" in _pricing
+                                and "completion" in _pricing
+                            ):
+                                try:
+                                    _is_free = (
+                                        float(_pricing["prompt"]) == 0
+                                        and float(_pricing["completion"]) == 0
+                                    )
+                                except (TypeError, ValueError):
+                                    _is_free = False
                             # Also include explicit `:free` suffix variants
                             _is_free = _is_free or _mid.endswith(":free")
                             if not _is_free:
@@ -8866,7 +8901,7 @@ _SETTINGS_DEFAULTS = {
     "structured_code_default_view": "auto",  # JSON/YAML fenced-block default render: auto | on | off (#484 follow-up). auto => Tree when line count >= structured_code_auto_tree_lines, else Raw.
     "structured_code_auto_tree_lines": 10,  # in 'auto' mode, minimum line count to default a JSON/YAML block to Tree view (preserves the original hardcoded >=10 behavior)
     "session_endless_scroll": False,  # auto-load older transcript pages while scrolling upward
-    "chat_activity_display_mode": "compact_worklog",  # compact_worklog | transparent_stream
+    "chat_activity_display_mode": "compact_worklog",  # compact_worklog | transparent_stream | hide_all_activity
     "auto_scroll_follow": True,  # follow new output to the bottom while streaming (Codex/Claude-Code-style sticky bottom); the user scrolling up unpins and is respected
     "worklog_details_expanded_default": False,  # opt-in: expand Worklog details by default; default remains folded
     "hide_composer_attach": False,  # hide attach button in composer footer
@@ -9128,7 +9163,7 @@ _SETTINGS_ENUM_VALUES = {
     "font_size": {"small", "default", "large", "xlarge"},
     "auto_title_refresh_every": {"0", "5", "10", "20"},
     "default_message_mode": {"queue", "interrupt", "steer"},
-    "chat_activity_display_mode": {"compact_worklog", "transparent_stream"},
+    "chat_activity_display_mode": {"compact_worklog", "transparent_stream", "hide_all_activity"},
     "structured_code_default_view": {"auto", "on", "off"},
 }
 _SETTINGS_INT_RANGES = {

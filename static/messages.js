@@ -2603,6 +2603,13 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
     const sourceEvent={
       ...raw,
       source_event_type:sourceEventType,
+      // Persist a creation timestamp the FIRST time we see this source event, so
+      // the worklog event timestamp (#5700/#5739) survives settlement. Reasoning
+      // events carry no server timestamp; without this, the live DOM shows a
+      // fallback time but the settled scene row rebuilds with created_at:null and
+      // the timestamp disappears. Prefer any real server-supplied stamp; fall back
+      // to now only when none exists. (#5739 gate finding.)
+      created_at:raw.created_at??raw.timestamp??raw.ts??(Date.now()/1000),
       activitySegmentSeq:raw.activitySegmentSeq??raw.activity_segment_seq??_assistantSegmentSeq,
       activityBurstId:raw.activityBurstId??raw.activity_burst_id??_currentActivityBurstId,
     };
@@ -2710,7 +2717,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
     return Number.isFinite(seq)&&seq>0?seq:1;
   }
   function _anchorSceneActiveMode(){
-    const normalize=value=>value==='transparent_stream'||value==='compact_worklog'?value:'';
+    const normalize=value=>value==='transparent_stream'||value==='compact_worklog'||value==='hide_all_activity'?value:'';
     if(typeof window!=='undefined'){
       if(typeof window.chatActivityMode==='function'){
         try{
@@ -2730,6 +2737,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       : null;
     if(sceneMode==='transparent_stream') return (hints&&hints.transparent_stream)||'chronological_activity';
     if(sceneMode==='compact_worklog') return (hints&&hints.compact_worklog)||row.display_hint||'activity_row';
+    if(sceneMode==='hide_all_activity') return (hints&&hints.hidden_activity)||'hidden_activity';
     return row&&row.display_hint||'activity_row';
   }
   function _renderAnchorLiveScene(){
@@ -3484,7 +3492,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       }
     }
     const base=(projectedScene&&typeof projectedScene==='object')?projectedScene:{};
-    const sceneMode=base.mode==='transparent_stream'?'transparent_stream':_anchorSceneActiveMode();
+    const sceneMode=base.mode==='transparent_stream'||base.mode==='hide_all_activity' ? base.mode : _anchorSceneActiveMode();
     const messageFinalAnswer=_anchorSceneFinalAnswerText(lastAsst);
     const finalAnswer=_anchorSceneCleanText(messageFinalAnswer)
       ? messageFinalAnswer
@@ -3593,6 +3601,8 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
     }
   }
   function _anchorSceneHasWorklogWorthyRows(scene){
+    if(scene&&scene.mode==='hide_all_activity') return false;
+    if(typeof window!=='undefined'&&typeof window.isFinalAnswerOnlyMode==='function'&&window.isFinalAnswerOnlyMode()) return false;
     // A worklog (the collapsible "已处理 …" rail) is only meaningful when the turn
     // actually DID worklog-worthy work — a tool call, a thinking/reasoning pass, or
     // a compression lifecycle card. A turn that only streamed prose (e.g. a long
@@ -3630,12 +3640,14 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
     if(!lastAsst) return false;
     const projectedScene=_projectLiveAnchorActivityScene();
     const scene=_completeSettledAnchorSceneForTurn(messages,lastAsstIndex,projectedScene);
-    if(scene&&Array.isArray(scene.activity_rows)&&scene.activity_rows.length
-        &&_anchorSceneHasWorklogWorthyRows(scene)){
+    if(scene&&Array.isArray(scene.activity_rows)&&scene.activity_rows.length){
+      const hasWorklogRows=_anchorSceneHasWorklogWorthyRows(scene);
+      const shouldPersistScene=hasWorklogRows||scene.mode==='hide_all_activity';
+      if(!shouldPersistScene) return false;
       lastAsst._anchor_stream_id=streamId;
       lastAsst._anchor_activity_scene=scene;
       _persistSettledAnchorScene(lastAsst, scene, lastAsstIndex);
-      return true;
+      return hasWorklogRows;
     }
     return false;
   }
@@ -3897,6 +3909,10 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
         status:row.status||undefined,
         stream_id:row.stream_id||streamId,
         run_id:row.run_id||streamId,
+        // Carry the row's persisted creation timestamp through hydration so the
+        // worklog event timestamp (#5700/#5739) survives a settled-snapshot rebuild
+        // (payload may not carry created_at even when the row does). (#5739 gate.)
+        created_at:payload.created_at??row.created_at??undefined,
       };
       try{
         _anchorApi.applyAssistantTurnAnchorSourceEvent(_anchorRegistry,sourceEvent,{session_id:activeSid,stream_id:streamId,run_id:streamId});
