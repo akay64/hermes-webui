@@ -87,7 +87,7 @@ def test_share_action_buttons_are_not_duplicated():
 def test_share_snapshot_redaction_is_always_on_regardless_of_setting():
     # The public-share boundary must redact credentials + local paths and drop
     # non-text/tool/system content EVEN IF the operator disabled api_redact_enabled.
-    import os, tempfile, importlib
+    import os, tempfile
     os.environ.setdefault("HERMES_WEBUI_STATE_DIR", tempfile.mkdtemp())
     import api.config as config
     import api.shares as shares

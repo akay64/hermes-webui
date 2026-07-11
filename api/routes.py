@@ -5125,10 +5125,10 @@ def _resolve_share_session_pair(sid: str, handler):
         cli_meta = _lookup_cli_session_metadata(sid) or {}
         effective_profile = cli_meta.get("profile") or None
         if not _session_visible_to_active_profile(effective_profile, handler):
-            raise KeyError(sid)
+            raise KeyError(sid) from None
         synth, reason = _claim_or_synthesize_cli_session(sid, cli_meta=cli_meta)
         if reason == "was_webui" or synth is None:
-            raise KeyError(sid)
+            raise KeyError(sid) from None
         return synth, None, cli_meta
 
 
