@@ -21,6 +21,7 @@ import pytest
 
 REPO = Path(__file__).resolve().parents[1]
 SESSIONS_SRC = (REPO / "static" / "sessions.js").read_text(encoding="utf-8")
+MESSAGES_SRC = (REPO / "static" / "messages.js").read_text(encoding="utf-8")
 NODE = shutil.which("node")
 
 
@@ -88,7 +89,20 @@ def _extract_function(source: str, name: str) -> str:
 
 
 LOAD_SESSION_SRC = _extract_function(SESSIONS_SRC, "loadSession")
+LOAD_SESSION_ONCE_SRC = _extract_function(SESSIONS_SRC, "_loadSessionOnce")
 ENSURE_MESSAGES_LOADED_SRC = _extract_function(SESSIONS_SRC, "_ensureMessagesLoaded")
+SESSION_UPDATED_HELPER_SRC = _extract_function(MESSAGES_SRC, "_queueSessionUpdatedRefresh")
+LOAD_SESSION_COORDINATION_SRC = "\n\n".join(
+    _extract_function(SESSIONS_SRC, name)
+    for name in (
+        "_canonicalSessionLoadId",
+        "_sessionLoadNeedsFollowUp",
+        "_sessionLoadCurrentMessageCount",
+        "_startSessionLoad",
+        "_runQueuedSessionLoad",
+        "_queueSessionLoadAfterActive",
+    )
+)
 
 
 def _normalise_ws(s: str) -> str:
@@ -96,7 +110,7 @@ def _normalise_ws(s: str) -> str:
 
 
 def test_loadsession_has_generation_token_and_forwards_to_ensure_messages_loaded():
-    body = LOAD_SESSION_SRC
+    body = LOAD_SESSION_ONCE_SRC
     assert "_loadSessionGeneration" in body, (
         "loadSession() must use a global generation counter so superseded loads "
         "can be rejected by continuation ownership checks"
@@ -120,9 +134,26 @@ def test_loadsession_has_generation_token_and_forwards_to_ensure_messages_loaded
         "loadSession() must pass generation into _ensureMessagesLoaded() for stale-owner checks"
     )
     assert (
-        "showToast('Failed to load session" in LOAD_SESSION_SRC
-        or "showToast('Failed to load conversation messages" in LOAD_SESSION_SRC
+        "showToast('Failed to load session" in LOAD_SESSION_ONCE_SRC
+        or "showToast('Failed to load conversation messages" in LOAD_SESSION_ONCE_SRC
     ), "loadSession() should preserve toast-based failure paths"
+
+
+def test_same_session_reload_callers_wait_or_queue_a_follow_up():
+    body = LOAD_SESSION_SRC
+    assert "const activeLoad=_activeSessionLoad;" in body
+    assert "return _sessionLoadNeedsFollowUp(opts)" in body
+    assert "_queueSessionLoadAfterActive(sid,opts,activeLoad)" in body
+    assert "return activeLoad.promise" in body
+    assert "if(sameSessionForceReload&&_loadingSessionId===sid) return;" not in SESSIONS_SRC
+
+
+def test_session_updated_refresh_preserves_cross_session_suppression_and_queues_same_session():
+    body = SESSION_UPDATED_HELPER_SRC
+    assert "if(loadingSid&&loadingSid!==sid) return false;" in body
+    assert "externalRefreshReason:'session-updated'" in body
+    assert "minimumMessageCount:serverCount" in body
+    assert "_queueSessionUpdatedRefresh(sid, Number(d.message_count));" in MESSAGES_SRC
 
 
 def test_ensure_messages_loaded_ownership_guard_pre_and_post_await():
@@ -201,6 +232,7 @@ function createEnvironment() {
     activeStreamId: null,
   };
   globalThis._loadingSessionId = null;
+  globalThis._activeSessionLoad = null;
   globalThis._loadingOlder = false;
   globalThis._loadSessionGeneration = 0;
   globalThis._pendingCarryForwardSnapshot = null;
@@ -331,8 +363,11 @@ let toolSyncCalls = 0;
 let toastCalls = [];
 
 // Source under test
+__LOAD_SESSION_COORDINATION_SRC__
 __LOAD_SESSION_SRC__
+__LOAD_SESSION_ONCE_SRC__
 __ENSURE_MESSAGES_LOADED_SRC__
+__SESSION_UPDATED_HELPER_SRC__
 
 async function waitForQueued(apiHost, url) {
   const target = String(url);
@@ -542,11 +577,85 @@ async function runStaleRejectedIdleCatch() {
   };
 }
 
+async function runSameSessionMutationRefreshQueue() {
+  createEnvironment();
+  S.session = { session_id: 'sid-atlas', message_count: 21 };
+  const apiHost = makeHarness();
+  globalThis.apiHost = apiHost;
+  globalThis.api = apiHost.api;
+
+  const afterMutationMeta = {
+    session: { ...API_ATLAS_META.session, message_count: 22 },
+  };
+  const afterMutationMsgs = {
+    session: {
+      ...API_ATLAS_MSGS.session,
+      message_count: 22,
+      messages: [{ role: 'assistant', content: 'after-mutation-transcript' }],
+    },
+  };
+  const calls = {
+    firstMeta: apiHost.enqueue(buildMessageUrl('sid-atlas', 0)),
+    firstMsgs: apiHost.enqueue(buildMessageUrl('sid-atlas', 1)),
+    secondMeta: apiHost.enqueue(buildMessageUrl('sid-atlas', 0)),
+    secondMsgs: apiHost.enqueue(buildMessageUrl('sid-atlas', 1)),
+  };
+
+  const first = loadSession('sid-atlas', {
+    force: true,
+    keepStaleUntilLoaded: true,
+    externalRefreshReason: 'external-refresh',
+  });
+  await waitForQueued(apiHost, calls.firstMeta.url);
+  calls.firstMeta._resolve(API_ATLAS_META);
+  await waitForQueued(apiHost, calls.firstMsgs.url);
+
+  let duplicateSettled = false;
+  const duplicate = loadSession('sid-atlas', {
+    force: true,
+    keepStaleUntilLoaded: true,
+    externalRefreshReason: 'external-refresh',
+  });
+  duplicate.then(() => { duplicateSettled = true; });
+  await Promise.resolve();
+  const duplicateSettledBeforeFirst = duplicateSettled;
+
+  const eventQueued = _queueSessionUpdatedRefresh('sid-atlas', 22);
+  let secondSettled = false;
+  const second = loadSession('sid-atlas', {
+    force: true,
+    keepStaleUntilLoaded: true,
+    externalRefreshReason: 'undo',
+  });
+  second.then(() => { secondSettled = true; });
+  await Promise.resolve();
+  const secondSettledBeforeFirst = secondSettled;
+
+  calls.firstMsgs._resolve(API_ATLAS_MSGS);
+  await first;
+  await duplicate;
+  await waitForQueued(apiHost, calls.secondMeta.url);
+  calls.secondMeta._resolve(afterMutationMeta);
+  await waitForQueued(apiHost, calls.secondMsgs.url);
+  calls.secondMsgs._resolve(afterMutationMsgs);
+  await second;
+
+  return {
+    eventQueued,
+    duplicateSettledBeforeFirst,
+    secondSettledBeforeFirst,
+    apiCalls: apiHost.apiCalls.slice(),
+    finalSid: S.session && S.session.session_id,
+    messages: snapshotState().messages,
+  };
+}
+
 async function runAll() {
   return {
     crossSessionOrdering: await runCrossSessionOrdering(),
     observedIdleCrossSessionOrdering: await runObservedIdleCrossSessionOrdering(),
     staleIdleCatch: await runStaleRejectedIdleCatch(),
+    sameSessionMutationQueue: await runSameSessionMutationRefreshQueue(),
   };
 }
 
@@ -575,18 +684,63 @@ def _run_node(script: str) -> dict:
     return json.loads(output_lines[-1])
 
 
+_SESSION_UPDATED_HELPER_NODE_TEMPLATE = r'''
+globalThis.S = {
+  session: { session_id: 'sid-atlas', message_count: 10 },
+  messages: [],
+};
+globalThis._loadingSessionId = 'sid-atlas';
+const calls = [];
+globalThis.loadSession = (sid, opts) => {
+  calls.push({ sid, opts });
+  return Promise.resolve();
+};
+__SESSION_UPDATED_HELPER_SRC__
+
+const sameSessionQueued = _queueSessionUpdatedRefresh('sid-atlas', 11);
+globalThis._loadingSessionId = 'sid-beacon';
+const crossSessionSuppressed = _queueSessionUpdatedRefresh('sid-atlas', 12);
+globalThis._loadingSessionId = 'sid-atlas';
+S.session.message_count = 11;
+const alreadyCaughtUp = _queueSessionUpdatedRefresh('sid-atlas', 11);
+console.log(JSON.stringify({ sameSessionQueued, crossSessionSuppressed, alreadyCaughtUp, calls }));
+'''
+
+
+@pytest.mark.skipif(NODE is None, reason="node not on PATH")
+def test_session_updated_helper_routes_same_session_events_safely():
+    body = _run_node(
+        _SESSION_UPDATED_HELPER_NODE_TEMPLATE.replace(
+            "__SESSION_UPDATED_HELPER_SRC__", SESSION_UPDATED_HELPER_SRC
+        )
+    )
+    assert body["sameSessionQueued"] is True
+    assert body["crossSessionSuppressed"] is False
+    assert body["alreadyCaughtUp"] is False
+    assert len(body["calls"]) == 1
+    assert body["calls"][0]["sid"] == "sid-atlas"
+    assert body["calls"][0]["opts"]["minimumMessageCount"] == 11
+
+
 @pytest.mark.skipif(NODE is None, reason="node not on PATH")
 def test_loadsession_cross_session_ordering_and_stale_reject_behavior():
     script = _NODE_SCRIPT_TEMPLATE.replace(
+        "__LOAD_SESSION_COORDINATION_SRC__", LOAD_SESSION_COORDINATION_SRC
+    ).replace(
         "__LOAD_SESSION_SRC__", LOAD_SESSION_SRC
     ).replace(
+        "__LOAD_SESSION_ONCE_SRC__", LOAD_SESSION_ONCE_SRC
+    ).replace(
         "__ENSURE_MESSAGES_LOADED_SRC__", ENSURE_MESSAGES_LOADED_SRC
+    ).replace(
+        "__SESSION_UPDATED_HELPER_SRC__", SESSION_UPDATED_HELPER_SRC
     )
     body = _run_node(script)
 
     cross = body["crossSessionOrdering"]
     stale = body["staleIdleCatch"]
     observed = body["observedIdleCrossSessionOrdering"]
+    mutation_queue = body["sameSessionMutationQueue"]
 
     def _assert_atlas_wins(session_result, *, label):
         assert session_result["finalSid"] == "sid-atlas", f"{label}: stale overlap should end on Atlas session"
@@ -663,3 +817,21 @@ def test_loadsession_cross_session_ordering_and_stale_reject_behavior():
 
     assert cross["loadingSid"] is None, "load marker should be cleared after successful completion"
     assert stale["loadingSid"] is None, "load marker should be cleared after stale reject + re-owner completion"
+
+    assert mutation_queue["secondSettledBeforeFirst"] is False, (
+        "a same-session mutation refresh must remain pending until the active load settles"
+    )
+    assert mutation_queue["duplicateSettledBeforeFirst"] is False, (
+        "a same-session duplicate refresh must await the active load"
+    )
+    assert mutation_queue["eventQueued"] is True, (
+        "a same-session session-updated event must join the active load and queue a follow-up"
+    )
+    assert mutation_queue["apiCalls"] == [
+        "/api/session?session_id=sid-atlas&messages=0&resolve_model=0",
+        "/api/session?session_id=sid-atlas&messages=1&resolve_model=0&msg_limit=2&expand_renderable=1",
+        "/api/session?session_id=sid-atlas&messages=0&resolve_model=0",
+        "/api/session?session_id=sid-atlas&messages=1&resolve_model=0&msg_limit=2&expand_renderable=1",
+    ], "queued mutation refresh should run exactly one bounded follow-up load"
+    assert mutation_queue["finalSid"] == "sid-atlas"
+    assert mutation_queue["messages"] == ["after-mutation-transcript"]

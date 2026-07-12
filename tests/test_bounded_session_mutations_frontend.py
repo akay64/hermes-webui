@@ -49,4 +49,7 @@ def test_older_message_window_refreshes_canonical_count_and_topbar():
 
 
 def test_duplicate_same_session_force_reload_is_coalesced():
-    assert "if(sameSessionForceReload&&_loadingSessionId===sid) return;" in SESSIONS_JS
+    assert "const activeLoad=_activeSessionLoad;" in SESSIONS_JS
+    assert "_queueSessionLoadAfterActive(sid,opts,activeLoad)" in SESSIONS_JS
+    assert "return activeLoad.promise;" in SESSIONS_JS
+    assert "if(sameSessionForceReload&&_loadingSessionId===sid) return;" not in SESSIONS_JS
