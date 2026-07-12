@@ -46,3 +46,7 @@ def test_older_message_window_refreshes_canonical_count_and_topbar():
     no_older_idx = fn.index("if (!olderMsgs.length)")
     assert no_older_idx < fn.index(sync, no_older_idx) < fn.index("return;", no_older_idx)
     assert fn.index("renderMessages({ preserveScroll: true });") < fn.rindex(sync)
+
+
+def test_duplicate_same_session_force_reload_is_coalesced():
+    assert "if(sameSessionForceReload&&_loadingSessionId===sid) return;" in SESSIONS_JS
