@@ -3789,7 +3789,16 @@ async function _loadOlderMessages() {
       olderMsgs = (responseSession.messages || []).filter(m => m && m.role);
       nextMessages = [...olderMsgs, ...S.messages];
     }
-    if (!olderMsgs.length) { _messagesTruncated = !!responseSession._messages_truncated; return; }
+    if (!olderMsgs.length) {
+      _messagesTruncated = !!responseSession._messages_truncated;
+      _oldestIdx = responseSession._messages_offset || 0;
+      const serverMessageCount = Number(responseSession.message_count);
+      if (S.session && S.session.session_id === sid && Number.isFinite(serverMessageCount)) {
+        S.session.message_count = serverMessageCount;
+      }
+      if (typeof syncTopbar === 'function') syncTopbar();
+      return;
+    }
     // Replace with the larger tail window and preserve scroll as if older
     // messages were prepended. When the suffix check fails, nextMessages
     // already encodes the legacy prepend fallback so the visible behavior
@@ -3828,7 +3837,12 @@ async function _loadOlderMessages() {
     _messageRenderWindowSize=_currentMessageRenderWindowSize()+Math.max(addedRenderable, MESSAGE_RENDER_WINDOW_DEFAULT);
     _messagesTruncated = !!responseSession._messages_truncated;
     _oldestIdx = responseSession._messages_offset || 0;
+    const serverMessageCount = Number(responseSession.message_count);
+    if (S.session && S.session.session_id === sid && Number.isFinite(serverMessageCount)) {
+      S.session.message_count = serverMessageCount;
+    }
     renderMessages({ preserveScroll: true });
+    if (typeof syncTopbar === 'function') syncTopbar();
     if (container) {
       // Prepending older messages must not teleport the reader. Anchor to the
       // first visible rendered row and restore that row's top offset after the
