@@ -4773,8 +4773,7 @@ document.addEventListener('click',function(e){
     if(effort){
       // Post to session update so reasoning_effort is session-scoped
       // (like model switching), not a global config.yaml write.
-      const ctx=_reasoningEffortContext();
-      const payload={session_id:(S&&S.session&&S.session.session_id)||'',reasoning_effort:effort,model:ctx.model,provider:ctx.provider};
+      const payload={session_id:(S&&S.session&&S.session.session_id)||'',reasoning_effort:effort};
       api('/api/session/update',{method:'POST',body:JSON.stringify(payload)})
         .then(function(st){
           // Update in-memory session state immediately
