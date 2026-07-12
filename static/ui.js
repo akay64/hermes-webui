@@ -5096,9 +5096,16 @@ let _reasoningFetchSeq=0;
 
 function fetchReasoningChip(keyOverride){
   // Set the cache key OPTIMISTICALLY before the request so rapid routine syncs
-  // while this GET is in flight short-circuit instead of re-dispatching (that
+  // while this GET is in-flight short-circuit instead of re-dispatching (that
   // in-flight window is exactly where the #4650 storm lived).
-  const key=keyOverride===undefined?_reasoningEffortQuery():keyOverride;
+  var baseKey=keyOverride===undefined?_reasoningEffortQuery():keyOverride;
+  // If the session has a reasoning_effort override, pass it as a hint so the
+  // backend returns it as authoritative (session-scoped, not config.yaml).
+  var key=baseKey;
+  var sessionEffort=(S&&S.session&&S.session.reasoning_effort)||null;
+  if(sessionEffort!==null){
+    key=baseKey+(baseKey?'&':'?')+'session_effort='+encodeURIComponent(sessionEffort);
+  }
   const seq=++_reasoningFetchSeq;
   _lastReasoningFetchKey=key;
   api('/api/reasoning'+key).then(function(st){
@@ -5218,16 +5225,14 @@ document.addEventListener('click',function(e){
   if(e.target.closest('.reasoning-option')){
     const opt=e.target.closest('.reasoning-option');
     const effort=opt&&opt.dataset.effort;
-    // NOTE: effort may be the empty string for the "Default" option (clears
-    // the override). Check option presence, not truthiness — `if(effort)` would
-    // silently ignore the Default click and leave the toggle one-way off-only.
-    // (#6219 round-3)
+    // effort may be empty for the Default option, which clears the session
+    // override. Check option presence rather than effort truthiness.
     if(opt){
-      const payload=Object.assign({effort:effort},_reasoningEffortContext());
-      api('/api/reasoning',{method:'POST',body:JSON.stringify(payload)})
+      const ctx=_reasoningEffortContext();
+      const payload={session_id:(S&&S.session&&S.session.session_id)||'',reasoning_effort:effort,model:ctx.model,provider:ctx.provider};
+      api('/api/session/update',{method:'POST',body:JSON.stringify(payload)})
         .then(function(st){
-          // For Default (effort=''), the returned reasoning_effort is '' (clear)
-          // — display 'Default' rather than an empty toast.
+          if(S&&S.session) S.session.reasoning_effort=effort;
           const display=(st&&st.reasoning_effort)||effort||'Default';
           _applyReasoningChip((st&&st.reasoning_effort)||effort, st||{});
           showToast('🧠 Reasoning effort set to '+display);
