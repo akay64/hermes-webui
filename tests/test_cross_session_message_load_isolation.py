@@ -518,25 +518,25 @@ async function runStaleRejectedIdleCatch() {
   globalThis.apiHost = apiHost;
   globalThis.api = apiHost.api;
 
-  S.session = { session_id: 'sid-atlas', message_count: 0 };
+  S.session = { session_id: 'sid-beacon', message_count: 0 };
 
   const calls = {
-    firstMeta: apiHost.enqueue(buildMessageUrl('sid-atlas', 0)),
-    firstMsgs: apiHost.enqueue(buildMessageUrl('sid-atlas', 1)),
+    firstMeta: apiHost.enqueue(buildMessageUrl('sid-beacon', 0)),
+    firstMsgs: apiHost.enqueue(buildMessageUrl('sid-beacon', 1)),
     secondMeta: apiHost.enqueue(buildMessageUrl('sid-atlas', 0)),
     secondMsgs: apiHost.enqueue(buildMessageUrl('sid-atlas', 1)),
   };
 
-  const first = loadSession('sid-atlas', { force: true });
-  calls.firstMeta._resolve(API_ATLAS_META);
+  const first = loadSession('sid-beacon', { force: true });
+  calls.firstMeta._resolve(API_BEACON_META);
 
   // Ensure the first load has entered the messages fetch and owns the pending API
-  // call before the superseding same-session load begins.
+  // call before the superseding cross-session load begins.
   await waitForQueued(apiHost, calls.firstMsgs.url);
 
   const second = loadSession('sid-atlas', { force: true });
 
-  // The stale first request rejects while the second newer request is in flight.
+  // The stale Beacon request rejects while the newer Atlas request is in flight.
   calls.firstMsgs._reject(new Error('owner lost while load was in-flight'));
   calls.secondMeta._resolve(API_ATLAS_RELOAD_META);
   calls.secondMsgs._resolve(API_ATLAS_RELOAD_MSGS);
@@ -544,7 +544,7 @@ async function runStaleRejectedIdleCatch() {
   await Promise.all([first, second]);
 
   return {
-    scenario: 'stale-idle-catch',
+    scenario: 'stale-cross-session-catch',
     finalSid: S.session && S.session.session_id,
     messages: snapshotState().messages,
     toolCalls: snapshotState().toolCalls,
@@ -663,17 +663,25 @@ def test_loadsession_cross_session_ordering_and_stale_reject_behavior():
     _assert_atlas_wins(observed, label="observed-idle-cross-session-ordering")
     assert observed["toastCalls"] == [], "stale Beacon return in idle-path race should not show toast"
 
-    # 3) Stale rejected idle-branch catch must be ownership-guarded and not mutate shared pane.
+    # 3) A rejected stale cross-session idle-branch load must be ownership-guarded
+    #    and must not mutate the newly active pane.
+    assert stale["finalSid"] == "sid-atlas", "stale rejection must leave Atlas active"
     assert stale["messages"] == ["reloaded-active-transcript"], "stale catch must not keep stale transcript"
     assert stale["toolCalls"] == [{"name": "tool-atlas-new", "done": True}], "stale catch must not overwrite tool state"
     assert stale["truncated"] is True and stale["oldestIdx"] == 33, "active owner should install latest metadata"
-    assert stale["msgInner"] == "INIT_LOADING", (
+    assert "Failed to load messages" not in stale["msgInner"], (
         "stale reject from superseded load must not write failure placeholder"
+    )
+    assert "Loading conversation..." in stale["msgInner"], (
+        "the active cross-session load may retain its loading placeholder"
     )
     assert stale["toastCalls"] == [], "stale reject must not surface toast for superseded load"
     assert stale["apiCalls"].count(
+        "/api/session?session_id=sid-beacon&messages=1&resolve_model=0&msg_limit=2&expand_renderable=1"
+    ) == 1, "stale Beacon transcript should be attempted once"
+    assert stale["apiCalls"].count(
         "/api/session?session_id=sid-atlas&messages=1&resolve_model=0&msg_limit=2&expand_renderable=1"
-    ) == 2, "both old and active loads should have attempted message fetch"
+    ) == 1, "active Atlas transcript should be attempted once"
 
     assert cross["loadingSid"] is None, "load marker should be cleared after successful completion"
     assert stale["loadingSid"] is None, "load marker should be cleared after stale reject + re-owner completion"
