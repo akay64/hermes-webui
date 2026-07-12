@@ -130,8 +130,8 @@ def test_load_session_persists_only_after_metadata_loads():
     """Do not overwrite the last good localStorage sid before /api/session succeeds."""
     src = _read(SESSIONS_JS)
     # _mergePendingSessionMessage was lifted to a top-level helper for #6419,
-    # so use a stable boundary inside loadSession instead.
-    load = _block(src, "async function loadSession(sid)", "// Phase 2a:")
+    # so use the stable Phase 2a boundary inside the metadata-loading helper.
+    load = _block(src, "async function _loadSessionOnce(sid)", "// Phase 2a:")
     api_pos = load.index("data = await api(`/api/session")
     persist_pos = load.index("localStorage.setItem('hermes-webui-session',S.session.session_id)")
 

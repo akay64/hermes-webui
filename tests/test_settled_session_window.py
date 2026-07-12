@@ -126,6 +126,35 @@ console.log(JSON.stringify({bounded, full, forced, calls}));
     assert outcome["calls"][1]["options"] == {"timeoutMs": 120000}
 
 
+def test_reload_limit_preserves_expanded_window_without_force_reload_hint():
+    outcome = _node_driver(
+        _EXTRACT
+        + r"""
+const _INITIAL_MSG_LIMIT = 30;
+let _messagesTruncated = true;
+let _sameSessionForceReloadHint = null;
+let loadedRenderable = 90;
+const S = {
+  messages: Array.from({length: 90}, () => ({role: 'user'})),
+  session: {session_id: 'sid-1', message_count: 300},
+};
+function _currentLoadedRenderableMessageCount() { return loadedRenderable; }
+eval(extractFunction('_settledSessionMessageWindowLimit'));
+eval(extractFunction('_messageReloadLimitForSession'));
+console.log(JSON.stringify({
+  expanded: _messageReloadLimitForSession('sid-1'),
+  initial: (() => {
+    loadedRenderable = 30;
+    S.messages = Array.from({length: 30}, () => ({role: 'user'}));
+    return _messageReloadLimitForSession('sid-1');
+  })(),
+}));
+"""
+    )
+
+    assert outcome == {"expanded": 90, "initial": 30}
+
+
 def test_done_and_recovery_paths_do_not_expand_the_render_window():
     compact = "".join(MESSAGES_JS.split())
     assert "_fetchSettledSessionMessageWindow(activeSid,completedSession)" in compact
