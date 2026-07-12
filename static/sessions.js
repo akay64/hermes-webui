@@ -24,6 +24,113 @@ let _loadingSessionId = null;
 // concurrent loads can still race and overwrite each other unless we compare
 // the generation token as well.
 let _loadSessionGeneration = 0;
+// The generation token protects shared state from stale continuations, while
+// this promise coordinates callers that target the same session. A caller that
+// arrives during an active same-session refresh must not continue on an already
+// resolved `return;` path.
+let _activeSessionLoad = null;
+
+function _canonicalSessionLoadId(sid, opts) {
+  if(!opts.skipLineageResolve && typeof _resolveSessionIdFromSidebarLineage==='function'){
+    const resolvedSid=_resolveSessionIdFromSidebarLineage(sid);
+    if(resolvedSid&&resolvedSid!==sid) return resolvedSid;
+  }
+  return sid;
+}
+
+function _sessionLoadNeedsFollowUp(opts) {
+  const reason=String(opts&&opts.externalRefreshReason||'');
+  return reason==='retry'||reason==='undo'||reason==='session-updated';
+}
+
+function _sessionLoadCurrentMessageCount(sid) {
+  if(typeof S==='undefined'||!S.session||S.session.session_id!==sid) return null;
+  const count=Number(S.session.message_count);
+  return Number.isFinite(count)?count:null;
+}
+
+function _startSessionLoad(sid, opts) {
+  const promise=_loadSessionOnce(sid, opts||{});
+  const entry={
+    sid,
+    promise,
+    followUpPromise:null,
+    followUpOptions:null,
+    followUpRequiresMutation:false,
+    minimumMessageCount:Number(opts&&opts.minimumMessageCount),
+  };
+  _activeSessionLoad=entry;
+  const clearActive=()=>{
+    if(_activeSessionLoad===entry) _activeSessionLoad=null;
+  };
+  // Use both handlers so a failed load cannot leave a stale coordinator entry,
+  // and do not create an unhandled rejected promise from `.finally()`.
+  promise.then(clearActive,clearActive);
+  return promise;
+}
+
+function _runQueuedSessionLoad(sid, entry) {
+  if(typeof S==='undefined'||!S.session||S.session.session_id!==sid) return;
+  if(!entry.followUpRequiresMutation){
+    const minimum=entry.minimumMessageCount;
+    const current=_sessionLoadCurrentMessageCount(sid);
+    if(Number.isFinite(minimum)&&current!==null&&current>=minimum) return;
+  }
+  const opts={...(entry.followUpOptions||{}),_forceNew:true};
+  if(Number.isFinite(entry.minimumMessageCount)){
+    opts.minimumMessageCount=entry.minimumMessageCount;
+  }
+  return _startSessionLoad(sid,opts);
+}
+
+function _queueSessionLoadAfterActive(sid, opts, entry) {
+  const reason=String(opts&&opts.externalRefreshReason||'');
+  const minimum=Number(opts&&opts.minimumMessageCount);
+  if(Number.isFinite(minimum)){
+    const current=Number(entry.minimumMessageCount);
+    entry.minimumMessageCount=Number.isFinite(current)
+      ? Math.max(current,minimum)
+      : minimum;
+  }
+  if(reason==='retry'||reason==='undo'){
+    entry.followUpRequiresMutation=true;
+    entry.followUpOptions={...opts};
+  }else if(!entry.followUpOptions){
+    entry.followUpOptions={...opts};
+  }
+  if(!entry.followUpPromise){
+    entry.followUpPromise=entry.promise.then(
+      ()=>_runQueuedSessionLoad(sid,entry),
+      ()=>_runQueuedSessionLoad(sid,entry)
+    );
+  }
+  return entry.followUpPromise;
+}
+
+function loadSession(sid) {
+  const opts=arguments[1]||{};
+  sid=_canonicalSessionLoadId(sid,opts);
+  // Extension pre-open hooks belong to the public coordinator, not the
+  // execution core. This keeps coalesced, profile-retry, and continuation
+  // loads from notifying extensions more than once for one navigation.
+  if(!opts.skipExtHooks && !opts._preloadNotified && typeof _hermesNotifySessionOpen==='function'){
+    const preResult=_hermesNotifySessionOpen(sid,null,{preload:true,opts});
+    if(preResult&&preResult.cancel===true) return;
+  }
+  const forceReload=!!opts.force;
+  const currentSid=typeof S!=='undefined'&&S.session ? S.session.session_id : null;
+  const activeLoad=_activeSessionLoad;
+  if(!opts._forceNew&&activeLoad&&activeLoad.sid===sid){
+    if(forceReload&&currentSid===sid){
+      return _sessionLoadNeedsFollowUp(opts)
+        ? _queueSessionLoadAfterActive(sid,opts,activeLoad)
+        : activeLoad.promise;
+    }
+    if(!forceReload&&currentSid===sid) return activeLoad.promise;
+  }
+  return _startSessionLoad(sid,opts);
+}
+
 // #3306: Snapshot of S.messages captured by loadSession() right before it
 // clears them on a force-reload of the active session. Consumed by
 // _ensureMessagesLoaded() when calling _carryForwardEphemeralTurnFields so
@@ -1666,32 +1773,11 @@ async function _switchProfileForSessionLoad(profile){
   }
 }
 
-async function loadSession(sid){
+async function _loadSessionOnce(sid){
   const opts = arguments[1] || {};
-  // Resolve canonical lineage SID BEFORE both the direct and sidebar preload
-  // notifications so extensions always see the canonical session id, not the
-  // raw sidebar click id (which may differ after lineage folding).
-  if(!opts.skipLineageResolve && typeof _resolveSessionIdFromSidebarLineage==='function'){
-    const resolvedSid=_resolveSessionIdFromSidebarLineage(sid);
-    if(resolvedSid&&resolvedSid!==sid) sid=resolvedSid;
-  }
-  // Extension pre-open hook — fires once per sidebar click, not on every call.
-  // _openSidebarSession passes _preloadNotified:true so the hook isn't re-fired
-  // when loadSession runs the actual navigation inside it.
-  if(!opts.skipExtHooks && !opts._preloadNotified && typeof _hermesNotifySessionOpen==='function'){
-    var _preResult=_hermesNotifySessionOpen(sid, null, {preload:true, opts:opts});
-    if(_preResult&&_preResult.cancel===true){
-      return;
-    }
-  }
   const forceReload = !!opts.force;
   const currentSid = S.session ? S.session.session_id : null;
   const sameSessionForceReload = forceReload && currentSid===sid;
-  // A recovery event or a second refresh may arrive while the first
-  // same-session reload is still fetching its bounded window. It cannot add
-  // any information and would supersede the active generation, so let the
-  // existing owner finish instead of starting another destructive reload.
-  if(sameSessionForceReload&&_loadingSessionId===sid) return;
   // Clicking the already-open session in the sidebar is a no-op. Reloading it
   // tears down active pane state and can reset the long-session scroll window
   // to the top even though the user did not navigate anywhere. Explicit
@@ -1851,7 +1937,7 @@ async function loadSession(sid){
           return;
         }
         if (_isCurrentLoad()) _loadingSessionId = null;
-        return loadSession(sid,{...opts,skipProfileResolve:true,force:true,_preloadNotified:true});
+        return _loadSessionOnce(sid,{...opts,skipProfileResolve:true,force:true});
       }catch(switchErr){
         e=switchErr;
       }
@@ -1962,8 +2048,8 @@ async function loadSession(sid){
   // cross-profile continuation can't poison restore state with an unusable id.
   const continuationSid=(data.session&&data.session.continuation_session_id)||'';
   if(continuationSid&&continuationSid!==sid&&!opts.skipContinuationResolve){
-    _loadingSessionId=null;
-    return loadSession(continuationSid,{...opts,skipLineageResolve:true,skipContinuationResolve:true,force:true,_preloadNotified:true});
+    if (_isCurrentLoad()) _loadingSessionId=null;
+    return _loadSessionOnce(continuationSid,{...opts,skipLineageResolve:true,skipContinuationResolve:true,force:true});
   }
   S.session=data.session;
   if(typeof _clearEmptyComposerModelOverride==='function') _clearEmptyComposerModelOverride();

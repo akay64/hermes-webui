@@ -39,18 +39,19 @@ def _run_node(script: str) -> dict:
 
 
 def test_load_session_supports_force_reload_for_external_refresh():
-    assert "async function loadSession(sid)" in SESSIONS_JS
+    assert "function loadSession(sid)" in SESSIONS_JS
+    assert "async function _loadSessionOnce(sid)" in SESSIONS_JS
     assert "const opts = arguments[1] || {};" in SESSIONS_JS
     assert "const forceReload = !!opts.force" in SESSIONS_JS
-    assert "if(currentSid===sid && !forceReload) return;" in SESSIONS_JS
+    assert "_activeSessionLoad" in SESSIONS_JS
     assert "loadSession(sid, {force:true" in SESSIONS_JS
 
 
 def test_same_session_force_reload_does_not_restart_healthy_session_stream():
     """Refreshing a long transcript must not manufacture an SSE recovery gap."""
-    body = _function_body(SESSIONS_JS, "loadSession")
+    body = _function_body(SESSIONS_JS, "_loadSessionOnce")
     assert "const sameSessionForceReload = forceReload && currentSid===sid;" in body
-    assert "if(sameSessionForceReload&&_loadingSessionId===sid) return;" in body
+    assert "if(sameSessionForceReload&&_loadingSessionId===sid) return;" not in body
     assert "if(!sameSessionForceReload&&typeof stopSessionStream==='function') stopSessionStream();" in body
 
 
@@ -62,9 +63,9 @@ def test_session_updated_recovery_does_not_hijack_an_inflight_navigation():
     messages = Path("static/messages.js").read_text(encoding="utf-8")
     event_start = messages.index("addEventListener('session-updated'")
     event_body = messages[event_start : event_start + 1800]
-    guard = "if (typeof _loadingSessionId !== 'undefined' && _loadingSessionId) return;"
-    assert guard in event_body
-    assert event_body.index(guard) < event_body.index("loadSession(")
+    assert "function _queueSessionUpdatedRefresh(sid, serverCount)" in messages
+    assert "if(loadingSid&&loadingSid!==sid) return false;" in messages
+    assert "_queueSessionUpdatedRefresh(sid, Number(d.message_count));" in event_body
 
 
 def test_active_session_external_refresh_uses_metadata_then_force_reload():
@@ -458,7 +459,7 @@ def test_same_session_force_reload_keeps_loaded_transcript_width_hint():
     assert "const reloadLimitParam = boundedReloadLimit ? `&msg_limit=${boundedReloadLimit}` : '';" in SESSIONS_JS
     assert "if (_ownsLoad()) _clearSameSessionForceReloadHint(sid);" in SESSIONS_JS
 
-    load_start = SESSIONS_JS.index("async function loadSession(sid)")
+    load_start = SESSIONS_JS.index("async function _loadSessionOnce(sid)")
     load_end = SESSIONS_JS.index("// ── Handoff hint logic", load_start)
     load_body = SESSIONS_JS[load_start:load_end]
     capture_pos = load_body.index("if (sameSessionForceReload) _captureSameSessionForceReloadHint(sid);")

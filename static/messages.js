@@ -7566,6 +7566,27 @@ function _resumeSessionStreamAfterLiveChat(sid) {
   }, 0);
 }
 
+function _queueSessionUpdatedRefresh(sid, serverCount) {
+  const loadingSid=(typeof _loadingSessionId!=='undefined') ? _loadingSessionId : null;
+  // A load for another session owns the pane transition; an event from the
+  // session being left must remain suppressed. A load for this same session is
+  // different: loadSession() will await/coalesce it and schedule one bounded
+  // follow-up if the active request did not reach serverCount.
+  if(loadingSid&&loadingSid!==sid) return false;
+  const localCount=(S.session&&S.session.session_id===sid&&Number.isFinite(Number(S.session.message_count)))
+    ? Number(S.session.message_count)
+    : (Array.isArray(S.messages)?S.messages.length:0);
+  if(!Number.isFinite(serverCount)||serverCount<=localCount) return false;
+  if(typeof loadSession!=='function') return false;
+  void loadSession(sid,{
+    force:true,
+    externalRefreshReason:'session-updated',
+    keepStaleUntilLoaded:true,
+    minimumMessageCount:serverCount,
+  });
+  return true;
+}
+
 function startSessionStream(sid) {
   if (!sid) return;
   // Already on this session? No-op (loadSession is a no-op when re-selecting
@@ -7668,21 +7689,7 @@ function startSessionStream(sid) {
           : (S.session && S.session.session_id === sid);
         if (!isCurrent) return;
         if (S.activeStreamId) return;
-        // Do not let a recovery event start a second load while a navigation or
-        // same-session refresh already owns the pane. In particular, a
-        // cross-session click must not be hijacked by a stale event from the
-        // long session that was just on screen.
-        if (typeof _loadingSessionId !== 'undefined' && _loadingSessionId) return;
-        // Re-check against our CURRENT known count — a concurrent load may have
-        // already caught us up between the server's emit and now.
-        const localCount = (S.session && S.session.session_id === sid && Number.isFinite(Number(S.session.message_count)))
-          ? Number(S.session.message_count)
-          : (Array.isArray(S.messages) ? S.messages.length : 0);
-        const serverCount = Number(d.message_count);
-        if (!Number.isFinite(serverCount) || serverCount <= localCount) return;
-        if (typeof loadSession === 'function') {
-          void loadSession(sid, {force: true, externalRefreshReason: 'session-updated', keepStaleUntilLoaded: true});
-        }
+        _queueSessionUpdatedRefresh(sid, Number(d.message_count));
       } catch (_) {}
     });
     // ── Defect B: live-view of server-initiated (Option Z) turns ──────────

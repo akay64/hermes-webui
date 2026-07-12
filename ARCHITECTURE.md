@@ -1141,10 +1141,15 @@ terminal payload.
 
 Same-session force refreshes (metadata reconciliation and SSE recovery) keep the
 existing per-session SSE subscription alive while the bounded window is fetched.
-The browser also ignores a recovery frame while another session load owns the
-pane. This avoids creating an artificial subscribe gap that can repeatedly
-re-enter recovery for a large settled session, and prevents a stale event from
-hijacking a user-initiated session switch.
+The browser shares the active load promise with duplicate same-session callers.
+Mutation refreshes from `/undo` and `/retry`, plus same-session `session-updated`
+events, queue at most one bounded follow-up after that promise settles; an event
+follow-up is skipped when the active load already reached its reported message
+count. Events for a different session remain suppressed while navigation owns the
+pane. This avoids an artificial subscribe gap that can repeatedly re-enter
+recovery for a large settled session, prevents a stale event from hijacking a
+user-initiated session switch, and keeps mutation callers from continuing against
+an unfinished transcript refresh.
 
 ### Sprint 1 (March 30, 2026): Bug Fixes, Arch Foundations, First Tests
 
