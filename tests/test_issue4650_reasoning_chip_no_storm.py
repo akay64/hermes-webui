@@ -147,6 +147,44 @@ result.effort_after_fresh_B = _currentReasoningEffort;   // expect 'high'
 if (HANDLERS[0].onErr) HANDLERS[0].onErr();
 result.effort_after_stale_A_fail = _currentReasoningEffort; // expect still 'high'
 
+// 6. COMPOSER SELECTION RACE: in-flight reasoning GET resolves AFTER user
+//    picks a new effort via the composer chip. The old response must be
+//    discarded (seq guard) and the chip must show the user's new selection.
+const HANDLERS2 = [];
+var CALLS2 = [];
+_currentReasoningEffort = null; _lastReasoningFetchKey = null; _reasoningFetchSeq = 0;
+global.S = { session: { session_id: 'race-session', model: 'gpt-5', model_provider: 'openai' } };
+global.api = (url, opts) => {
+  CALLS2.push({url, opts});
+  return {
+    then: (onOk) => { HANDLERS2.push({ url, onOk, opts }); return { catch: () => {} }; },
+    catch: () => {},
+  };
+};
+// Dispatch a reasoning fetch (in-flight, seq becomes 1)
+fetchReasoningChip();
+const seqBeforeSelection = _reasoningFetchSeq;
+// User clicks a new effort in the composer
+const effort = 'high';
+const payload = { session_id: 'race-session', reasoning_effort: effort };
+// This is the code path from the chip click handler (ui.js:4784-4791)
+api('/api/session/update', {method:'POST', body: JSON.stringify(payload)})
+  .then(function(st){
+    if(S&&S.session) S.session.reasoning_effort = effort;
+    ++_reasoningFetchSeq;
+    _lastReasoningFetchKey = null;
+    _applyReasoningChip((st&&st.reasoning_effort)||effort, st||{});
+  });
+// Resolve the session update (HANDLERS2[1] because [0] is the reasoning GET)
+HANDLERS2[1].onOk({ reasoning_effort: 'high', supported_efforts: ['low','high'] });
+const afterSelection = _currentReasoningEffort;
+// Now the OLD in-flight reasoning GET resolves with stale data
+HANDLERS2[0].onOk({ reasoning_effort: 'low', supported_efforts: ['low','high'] });
+const afterOldResponse = _currentReasoningEffort;
+// The chip label should show 'high' (the new effort), not 'low' (the stale data)
+result.composerRace = { seqBeforeSelection, afterSelection, afterOldResponse };
+
+
 result.calls = CALLS;
 process.stdout.write(JSON.stringify(result));
 """
@@ -229,4 +267,19 @@ def test_stale_out_of_order_failure_does_not_hide_fresh_chip(outcome):
     assert outcome["effort_after_stale_A_fail"] == "high", (
         "a stale failure must not overwrite the fresh chip state: "
         f"got {outcome['effort_after_stale_A_fail']!r}"
+    )
+
+
+def test_composer_selection_invalidates_in_flight_fetch(outcome):
+    """Composer effort selection bumps seq so an in-flight GET cannot
+    overwrite the user's new selection after it resolves."""
+    race = outcome["composerRace"]
+    assert race["afterSelection"] == "high", (
+        "the chip must show the newly selected effort immediately: "
+        f"got {race['afterSelection']!r}"
+    )
+    assert race["afterOldResponse"] == "high", (
+        "a stale in-flight reasoning GET that resolves after the user selected "
+        "a new effort must be discarded (seq guard); expected 'high' (the "
+        f"selection), got {race['afterOldResponse']!r}"
     )
