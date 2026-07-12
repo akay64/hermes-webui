@@ -36,7 +36,7 @@ SESSIONS_JS = (ROOT / "static" / "sessions.js").read_text(encoding="utf-8")
 
 
 def _load_session_block() -> str:
-    start = SESSIONS_JS.index("async function loadSession(sid")
+    start = SESSIONS_JS.index("async function _loadSessionOnce(sid")
     end = SESSIONS_JS.index("function _resolveSessionModelForDisplaySoon", start)
     return SESSIONS_JS[start:end]
 

@@ -5802,9 +5802,6 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
         }
         _clearApprovalForOwner();
         _clearClarifyForOwner('terminal');
-        const shouldFollowOnDone=isActiveSession&&((typeof _shouldFollowMessagesOnDomReplace==='function')
-          ? _shouldFollowMessagesOnDomReplace()
-          : (typeof _isMessagePaneNearBottom==='function'&&_isMessagePaneNearBottom(1200)));
         const _settledStreamId=isActiveSession?(S.activeStreamId||(d&&d.stream_id)||''):'';
         let _settledDoneWindow=null;
         let _settledDoneWindowFailed=false;
@@ -5832,6 +5829,13 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
         // session switch during that await project the completed old stream
         // into the newly selected pane.
         if(isActiveSession&&!_isSessionCurrentPane(activeSid)) isActiveSession=false;
+        // The bounded window fetch above can take long enough for the reader
+        // to scroll away from the tail. Re-evaluate follow intent only after
+        // the await and pane-ownership check; a pre-fetch snapshot would yank
+        // a reader back to the bottom after they deliberately scrolled up.
+        const shouldFollowOnDone=isActiveSession&&((typeof _shouldFollowMessagesOnDomReplace==='function')
+          ? _shouldFollowMessagesOnDomReplace()
+          : (typeof _isMessagePaneNearBottom==='function'&&_isMessagePaneNearBottom(1200)));
         if(isActiveSession){
           S.activeStreamId=null;
         }
@@ -6011,7 +6015,8 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
           if(typeof _disarmKeepSettledWorklogOpen==='function') _disarmKeepSettledWorklogOpen();
           if(typeof _renderMessagesWithScrollSnapshot==='function') _renderMessagesWithScrollSnapshot();
           else renderMessages({preserveScroll:true});
-          if(shouldFollowOnDone&&typeof scrollToBottom==='function') scrollToBottom();
+          if(typeof _followSettledDoneIfStillPinned==='function') _followSettledDoneIfStillPinned();
+          else if(shouldFollowOnDone&&typeof scrollToBottom==='function') scrollToBottom();
           if(typeof noteWorkspaceMutationsFromToolCalls==='function') noteWorkspaceMutationsFromToolCalls(S.toolCalls);
           loadDir('.', { preservePreview: true });
           // TTS auto-read: speak the last assistant response if enabled (#499)
@@ -7585,6 +7590,13 @@ function _queueSessionUpdatedRefresh(sid, serverCount) {
     minimumMessageCount:serverCount,
   });
   return true;
+}
+
+function _followSettledDoneIfStillPinned(){
+  const shouldFollow=(typeof _shouldFollowMessagesOnDomReplace==='function')
+    ? _shouldFollowMessagesOnDomReplace()
+    : (typeof _isMessagePaneNearBottom==='function'&&_isMessagePaneNearBottom(1200));
+  if(shouldFollow&&typeof scrollToBottom==='function') scrollToBottom();
 }
 
 function startSessionStream(sid) {

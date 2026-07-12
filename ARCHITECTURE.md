@@ -1141,6 +1141,11 @@ terminal payload.
 
 Same-session force refreshes (metadata reconciliation and SSE recovery) keep the
 existing per-session SSE subscription alive while the bounded window is fetched.
+Reconnect recovery also derives its request limit from the currently displayed
+bounded window when no force-reload hint exists, so an expanded 90-row view does
+not collapse back to the initial 30-row tail. Completion follow intent is
+re-evaluated after the bounded fetch and pane-ownership check, so a reader who
+scrolls upward while that request is pending is not pulled back to the bottom.
 The browser shares the active load promise with duplicate same-session callers.
 Mutation refreshes from `/undo` and `/retry`, plus same-session `session-updated`
 events, queue at most one bounded follow-up after that promise settles; an event
