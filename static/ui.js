@@ -5227,8 +5227,7 @@ document.addEventListener('click',function(e){
     // effort may be empty for the Default option, which clears the session
     // override. Check option presence rather than effort truthiness.
     if(opt){
-      const ctx=_reasoningEffortContext();
-      const payload={session_id:(S&&S.session&&S.session.session_id)||'',reasoning_effort:effort,model:ctx.model,provider:ctx.provider};
+      const payload={session_id:(S&&S.session&&S.session.session_id)||'',reasoning_effort:effort};
       api('/api/session/update',{method:'POST',body:JSON.stringify(payload)})
         .then(function(st){
           if(S&&S.session) S.session.reasoning_effort=effort;
