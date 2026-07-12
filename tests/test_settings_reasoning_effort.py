@@ -19,7 +19,7 @@ def test_settings_reasoning_effort_select_exists():
 def test_settings_reasoning_effort_options_include_expected_levels():
     """The selector includes the canonical reasoning effort levels."""
     select_start = INDEX_HTML.index('id="settingsReasoningEffort"')
-    select_chunk = INDEX_HTML[select_start:select_start + 800]
+    select_chunk = INDEX_HTML[select_start:select_start + 1200]
     for level in ("none", "minimal", "low", "medium", "high", "xhigh", "max"):
         assert f'value="{level}"' in select_chunk, f"Missing option: {level}"
 
@@ -27,7 +27,7 @@ def test_settings_reasoning_effort_options_include_expected_levels():
 def test_settings_reasoning_effort_has_empty_default():
     """The selector has an empty-value '(Use provider default)' option."""
     select_start = INDEX_HTML.index('id="settingsReasoningEffort"')
-    select_chunk = INDEX_HTML[select_start:select_start + 800]
+    select_chunk = INDEX_HTML[select_start:select_start + 1200]
     assert 'value=""' in select_chunk
     assert "Use provider default" in select_chunk
 

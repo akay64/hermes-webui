@@ -72,3 +72,99 @@ def test_get_reasoning_status_override_none_falls_back():
     st = get_reasoning_status(override_effort=None)
     # Returns whatever config.yaml has (or empty string if unset)
     assert isinstance(st["reasoning_effort"], str)
+
+
+# ── Phase 1: adapter-off default return path ──────────────────────────
+
+def test_adapter_off_start_run_forwards_reasoning_effort(monkeypatch):
+    """_start_run default return passes reasoning_effort to _start_chat_stream_for_session."""
+    from api.routes import _start_run
+    from api.models import Session
+
+    monkeypatch.setattr("api.runtime_adapter.runtime_adapter_enabled", lambda: False)
+    monkeypatch.setattr("api.runtime_adapter.runtime_adapter_runner_enabled", lambda: False)
+
+    captured = {}
+    def _stub_stream(*args, **kwargs):
+        captured.update(kwargs)
+        return {"stream_id": "fake", "_status": 200}
+
+    monkeypatch.setattr("api.routes._start_chat_stream_for_session", _stub_stream)
+
+    s = Session(model="test/model")
+    _start_run(
+        s,
+        msg="hello",
+        attachments=[],
+        workspace="/tmp",
+        model="test/model",
+        model_provider="test",
+        reasoning_effort="high",
+        normalized_model=True,
+        source="webui",
+        route="test",
+    )
+    assert captured.get("reasoning_effort") == "high"
+
+
+def test_adapter_off_start_run_forwards_none_reasoning_effort(monkeypatch):
+    """_start_run forwards None reasoning_effort unchanged."""
+    from api.routes import _start_run
+    from api.models import Session
+
+    monkeypatch.setattr("api.runtime_adapter.runtime_adapter_enabled", lambda: False)
+    monkeypatch.setattr("api.runtime_adapter.runtime_adapter_runner_enabled", lambda: False)
+
+    captured = {}
+    def _stub_stream(*args, **kwargs):
+        captured.update(kwargs)
+        return {"stream_id": "fake", "_status": 200}
+
+    monkeypatch.setattr("api.routes._start_chat_stream_for_session", _stub_stream)
+
+    s = Session(model="test/model")
+    _start_run(
+        s,
+        msg="hello",
+        attachments=[],
+        workspace="/tmp",
+        model="test/model",
+        model_provider="test",
+        reasoning_effort=None,
+        normalized_model=True,
+        source="webui",
+        route="test",
+    )
+    assert captured.get("reasoning_effort") is None
+
+
+# ── Phase 2: start_session_turn wakeup path ────────────────────────────
+
+def test_start_session_turn_forwards_session_reasoning_effort(monkeypatch):
+    """start_session_turn passes s.reasoning_effort to _start_run."""
+    import tempfile
+    from pathlib import Path
+    from api.models import Session
+    from api.routes import start_session_turn
+
+    td = tempfile.mkdtemp(prefix="webui-test-wakeup-")
+    monkeypatch.setattr("api.models.SESSION_DIR", Path(td))
+    try:
+        s = Session(reasoning_effort="xhigh", model="test/model")
+        s.save()
+
+        captured = {}
+        def _stub_run(s_arg, **kwargs):
+            captured.update(kwargs)
+            return {"stream_id": "fake", "_status": 200}
+
+        monkeypatch.setattr("api.routes._start_run", _stub_run)
+        monkeypatch.setattr("api.routes.clear_process_wakeup_pause_if_model_changed", lambda *a, **kw: True)
+        monkeypatch.setattr("api.routes.process_wakeup_pause_credential_state_changed", lambda *a, **kw: True)
+        monkeypatch.setattr("api.routes.process_wakeup_pause_matches", lambda *a, **kw: False)
+
+        start_session_turn(s.session_id, "wakeup message")
+        assert captured.get("reasoning_effort") == "xhigh"
+    finally:
+        import shutil
+        shutil.rmtree(td, ignore_errors=True)

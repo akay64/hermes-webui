@@ -20953,6 +20953,7 @@ def _start_run(
         workspace=workspace,
         model=model,
         model_provider=model_provider,
+        reasoning_effort=reasoning_effort,
         normalized_model=normalized_model,
         diag=diag,
         source=source,
@@ -21085,6 +21086,7 @@ def start_session_turn(
             s = get_session(session_id)
         except KeyError:
             return {"error": "Session not found", "_status": 404}
+        _wakeup_reasoning_effort = getattr(s, "reasoning_effort", None)
         if clear_process_wakeup_pause_if_model_changed(
             s,
             model=model,
@@ -21198,6 +21200,7 @@ def start_session_turn(
         workspace=workspace,
         model=model,
         model_provider=model_provider,
+        reasoning_effort=_wakeup_reasoning_effort,
         normalized_model=normalized_model,
         source=turn_source,
         route="start_session_turn",
