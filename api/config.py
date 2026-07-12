@@ -3938,6 +3938,7 @@ def get_reasoning_status(
     model_id: str | None = None,
     provider_id: str | None = None,
     base_url: str | None = None,
+    override_effort: str | None = None,
 ) -> dict:
     """Return current reasoning configuration from the active profile's
     config.yaml — the same source of truth the CLI reads from.
@@ -3945,12 +3946,17 @@ def get_reasoning_status(
     Keys:
       - show_reasoning: bool — from ``display.show_reasoning`` (default True)
       - reasoning_effort: str — from ``agent.reasoning_effort`` ('' = default)
+      - override_effort: str — optional session-scoped override (overrides config)
     """
     config_data = _load_yaml_config_file(_get_config_path())
     display_cfg = config_data.get("display") or {}
     agent_cfg = config_data.get("agent") or {}
     show_raw = display_cfg.get("show_reasoning") if isinstance(display_cfg, dict) else None
-    effort_raw = agent_cfg.get("reasoning_effort") if isinstance(agent_cfg, dict) else None
+    effort_raw = (
+        override_effort
+        if override_effort
+        else (agent_cfg.get("reasoning_effort") if isinstance(agent_cfg, dict) else None)
+    )
 
     resolve_model = model_id
     resolve_provider = provider_id
