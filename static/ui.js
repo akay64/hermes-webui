@@ -5238,6 +5238,8 @@ document.addEventListener('click',function(e){
       api('/api/session/update',{method:'POST',body:JSON.stringify(payload)})
         .then(function(st){
           if(S&&S.session) S.session.reasoning_effort=effort;
+          ++_reasoningFetchSeq;
+          _lastReasoningFetchKey=null;
           const display=(st&&st.reasoning_effort)||effort||'Default';
           _applyReasoningChip((st&&st.reasoning_effort)||effort, st||{});
           showToast('🧠 '+t('reasoning_effort_set')+' '+display);
