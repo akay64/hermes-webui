@@ -294,8 +294,8 @@ class TestHookRegistration:
 
 
 def test_canonical_sid_resolved_before_preload_notification():
-    body = _extract_block(SESSIONS_JS, "async function loadSession(sid)")
-    idx_resolve = body.index("_resolveSessionIdFromSidebarLineage")
+    body = _extract_block(SESSIONS_JS, "function loadSession(sid)")
+    idx_resolve = body.index("_canonicalSessionLoadId")
     idx_preload = body.index("_hermesNotifySessionOpen")
     assert idx_resolve < idx_preload
 
@@ -306,7 +306,7 @@ def test_preload_veto_only_on_preload_phase():
 
 
 def test_continuation_retry_carries_preload_notified_flag():
-    body = _extract_block(SESSIONS_JS, "async function loadSession(sid)")
+    body = _extract_block(SESSIONS_JS, "async function _loadSessionOnce(sid)")
     idx_cont = body.index("continuationSid=")
     cont_branch = body[idx_cont:idx_cont + 400]
     assert "_preloadNotified:true" in cont_branch
@@ -366,7 +366,7 @@ def test_no_early_closemobilesidebar_before_sidebar_open():
 def test_cross_profile_retry_carries_preload_notified():
     """Cross-profile retry must pass _preloadNotified:true so the pre-hook
     doesn't re-fire after destructive side-effects already ran."""
-    body = _extract_block(SESSIONS_JS, "async function loadSession(sid)")
+    body = _extract_block(SESSIONS_JS, "async function _loadSessionOnce(sid)")
     idx_profile = body.index("skipProfileResolve:true")
     profile_branch = body[idx_profile:idx_profile + 200]
     assert "_preloadNotified:true" in profile_branch
