@@ -12594,7 +12594,7 @@ async function saveSettings(andClose){
             await api('/api/reasoning',{method:'POST',body:JSON.stringify({effort:newReasoningEffort})});
             _settingsReasoningEffortOnOpen=newReasoningEffort;
           }catch(_reasoningErr){
-            if(typeof showToast==='function') showToast('Failed to update default reasoning effort — settings saved');
+            if(typeof showToast==='function') showToast(t('reasoning_effort_settings_failed'));
           }
         }
       }
@@ -12637,7 +12637,7 @@ async function saveSettings(andClose){
           await api('/api/reasoning',{method:'POST',body:JSON.stringify({effort:newReasoningEffort})});
           _settingsReasoningEffortOnOpen=newReasoningEffort;
         }catch(_reasoningErr){
-          if(typeof showToast==='function') showToast('Failed to update default reasoning effort — settings saved');
+          if(typeof showToast==='function') showToast(t('reasoning_effort_settings_failed'));
         }
       }
     }
