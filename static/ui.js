@@ -4785,6 +4785,8 @@ document.addEventListener('click',function(e){
         .then(function(st){
           // Update in-memory session state immediately
           if(S&&S.session) S.session.reasoning_effort=effort;
+          ++_reasoningFetchSeq;
+          _lastReasoningFetchKey=null;
           _applyReasoningChip((st&&st.reasoning_effort)||effort, st||{});
           showToast('🧠 '+t('reasoning_effort_set')+' '+((st&&st.reasoning_effort)||effort));
         })
