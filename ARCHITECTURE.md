@@ -299,6 +299,13 @@ rather than replacing it with the full SSE payload. This keeps the visible trans
 and pagination state coherent without changing the experimental virtualization
 preference or the Agent repository.
 
+Session mutations that shrink a transcript, including WebUI `/undo` and `/retry`,
+reuse the same bounded same-session reload path after the server-side mutation. They
+must not issue an unbounded follow-up `GET /api/session` or manually replace
+`S.messages`, because that would promote a long session back into a full browser DOM
+and discard its pagination cursor. Older-message paging updates the canonical session
+count and refreshes the top-bar `loaded of total` metadata after each window change.
+
 Fallback sync endpoint: POST /api/chat still exists and holds the connection open until
 the agent finishes. The frontend never uses it but it can be useful for debugging.
 
