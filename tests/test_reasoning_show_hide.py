@@ -404,6 +404,20 @@ class TestReasoningConfigHelpers:
         # default takes effect.
         cfg.set_reasoning_effort('')
 
+    def test_set_reasoning_effort_empty_clears_key(self, tmp_path, monkeypatch):
+        """set_reasoning_effort('') deletes agent.reasoning_effort from config."""
+        import api.config as cfg
+        cfgfile = tmp_path / 'config.yaml'
+        monkeypatch.setattr(cfg, '_get_config_path', lambda: cfgfile)
+        monkeypatch.setattr(cfg, 'reload_config', lambda: None)
+        cfg.set_reasoning_effort('high')
+        cfg.set_reasoning_effort('')
+        import yaml as _yaml
+        data = _yaml.safe_load(cfgfile.read_text(encoding='utf-8'))
+        assert data.get('agent', {}).get('reasoning_effort') is None, (
+            "empty effort must clear agent.reasoning_effort from config.yaml"
+        )
+
     def test_get_reasoning_status_defaults_to_show_true(self, tmp_path, monkeypatch):
         """When config.yaml has no display section, show_reasoning defaults
         to True (matches CLI default where the setting is opt-in)."""

@@ -4741,9 +4741,11 @@ def set_reasoning_effort(
             f"Unknown reasoning effort '{effort}'. "
             f"Valid: none, {', '.join(VALID_REASONING_EFFORTS)}."
         )
+
     config_path = _get_config_path()
     with _cfg_lock:
         config_data = _load_yaml_config_file(config_path)
+        snapshot = copy.deepcopy(config_data)
         agent_cfg = config_data.get("agent")
         if not isinstance(agent_cfg, dict):
             agent_cfg = {}
@@ -4754,10 +4756,10 @@ def set_reasoning_effort(
             # "Default"/"On" re-enable path for thinking-toggle-only models).
             # Drop the key entirely rather than writing an empty string so the
             # CLI's "is reasoning_effort configured?" check stays simple.
+
             agent_cfg.pop("reasoning_effort", None)
         config_data["agent"] = agent_cfg
-        _save_yaml_config_file(config_path, config_data,
-            dirty_set={("agent", "reasoning_effort")})
+        _save_yaml_config_file(config_path, config_data, snapshot=snapshot)
     reload_config()
     return get_reasoning_status(
         model_id=model_id,
