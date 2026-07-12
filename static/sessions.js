@@ -3133,7 +3133,16 @@ function _messageReloadLimitForSession(sid){
       return Math.max(_INITIAL_MSG_LIMIT,loadedRenderableCount,loadedMessageCount+appendedMessageCount);
     }
   }
-  return _INITIAL_MSG_LIMIT;
+  // Recovery callers such as refreshSession() do not pass through the
+  // same-session force-reload path, so they have no captured hint. Preserve
+  // the currently displayed bounded window in that case instead of silently
+  // collapsing an expanded view back to the initial tail.
+  // Keep the policy in _settledSessionMessageWindowLimit so every bounded
+  // session fetch uses the same visible-row accounting.
+  const boundedLimit=typeof _settledSessionMessageWindowLimit==='function'
+    ? _settledSessionMessageWindowLimit(null,{forceBounded:true})
+    : null;
+  return boundedLimit===null ? _INITIAL_MSG_LIMIT : boundedLimit;
 }
 
 function _syncToolCallsForLoadedMessages(messages, sessionToolCalls){
