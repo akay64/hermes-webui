@@ -4533,23 +4533,25 @@ def set_reasoning_effort(
     Raises ``ValueError`` on an unrecognised level so callers can return 400.
     """
     raw = str(effort or "").strip().lower()
-    if not raw:
-        raise ValueError("effort is required")
-    if raw != "none" and raw not in VALID_REASONING_EFFORTS:
-        raise ValueError(
-            f"Unknown reasoning effort '{effort}'. "
-            f"Valid: none, {', '.join(VALID_REASONING_EFFORTS)}."
-        )
     config_path = _get_config_path()
     with _cfg_lock:
         config_data = _load_yaml_config_file(config_path)
+        snapshot = copy.deepcopy(config_data)
         agent_cfg = config_data.get("agent")
         if not isinstance(agent_cfg, dict):
             agent_cfg = {}
-        agent_cfg["reasoning_effort"] = raw
+        if raw:
+            if raw != "none" and raw not in VALID_REASONING_EFFORTS:
+                raise ValueError(
+                    f"Unknown reasoning effort '{effort}'. "
+                    f"Valid: none, {', '.join(VALID_REASONING_EFFORTS)}."
+                )
+            agent_cfg["reasoning_effort"] = raw
+        else:
+            # Empty = clear the key → use provider default
+            agent_cfg.pop("reasoning_effort", None)
         config_data["agent"] = agent_cfg
-        _save_yaml_config_file(config_path, config_data,
-            dirty_set={("agent", "reasoning_effort")})
+        _save_yaml_config_file(config_path, config_data, snapshot=snapshot)
     reload_config()
     return get_reasoning_status(
         model_id=model_id,
