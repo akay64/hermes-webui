@@ -4791,9 +4791,16 @@ let _reasoningFetchSeq=0;
 
 function fetchReasoningChip(keyOverride){
   // Set the cache key OPTIMISTICALLY before the request so rapid routine syncs
-  // while this GET is in flight short-circuit instead of re-dispatching (that
+  // while this GET is in-flight short-circuit instead of re-dispatching (that
   // in-flight window is exactly where the #4650 storm lived).
-  const key=keyOverride===undefined?_reasoningEffortQuery():keyOverride;
+  var baseKey=keyOverride===undefined?_reasoningEffortQuery():keyOverride;
+  // If the session has a reasoning_effort override, pass it as a hint so the
+  // backend returns it as authoritative (session-scoped, not config.yaml).
+  var key=baseKey;
+  var sessionEffort=(S&&S.session&&S.session.reasoning_effort)||null;
+  if(sessionEffort!==null){
+    key=baseKey+(baseKey?'&':'?')+'session_effort='+encodeURIComponent(sessionEffort);
+  }
   const seq=++_reasoningFetchSeq;
   _lastReasoningFetchKey=key;
   api('/api/reasoning'+key).then(function(st){
@@ -4913,9 +4920,14 @@ document.addEventListener('click',function(e){
     const opt=e.target.closest('.reasoning-option');
     const effort=opt&&opt.dataset.effort;
     if(effort){
-      const payload=Object.assign({effort:effort},_reasoningEffortContext());
-      api('/api/reasoning',{method:'POST',body:JSON.stringify(payload)})
+      // Post to session update so reasoning_effort is session-scoped
+      // (like model switching), not a global config.yaml write.
+      const ctx=_reasoningEffortContext();
+      const payload={session_id:(S&&S.session&&S.session.session_id)||'',reasoning_effort:effort,model:ctx.model,provider:ctx.provider};
+      api('/api/session/update',{method:'POST',body:JSON.stringify(payload)})
         .then(function(st){
+          // Update in-memory session state immediately
+          if(S&&S.session) S.session.reasoning_effort=effort;
           _applyReasoningChip((st&&st.reasoning_effort)||effort, st||{});
           showToast('🧠 Reasoning effort set to '+((st&&st.reasoning_effort)||effort));
         })
