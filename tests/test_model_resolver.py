@@ -300,23 +300,27 @@ def test_named_custom_slug_preserves_advertised_full_id_5979():
     assert model == 'x-ai/grok-4.5', f"full id must be preserved for custom:slug, got {model!r}"
 
 
-def test_custom_remote_cold_catalog_falls_back_to_legacy_heuristic_5979():
-    """#5979 tri-state: with a COLD/unbuilt catalog AND no config declaration
-    (no provenance at all), resolution falls back to the LEGACY family heuristic
-    so this narrow edge is never worse than the pre-fix behaviour.
+def test_custom_remote_cold_catalog_preserves_verbatim_5979():
+    """#5979 (reopened): with a COLD/unbuilt catalog AND no config declaration,
+    an explicit custom proxy PRESERVES the id verbatim — the strip now requires
+    positive provenance (endpoint advertises only the bare id), it is no longer
+    the cold default.
 
-    A first-party redundant prefix still strips (the #433 relay keeps working
-    cold), while an intrinsic/unknown prefix is preserved. The #5979 active-user
-    path never reaches this branch — a selected id is either config-declared
-    (see the config-declared test) or in the catalog the dropdown was built from.
+    This is the fix for b3nw's reopened case: a user's actively-selected
+    NON-default model on a ``custom:<slug>`` proxy was truncated on every cold
+    send because the old cold fallback ran the legacy family heuristic. A wrong
+    strip destroys a namespace the proxy routes on (recurs every turn,
+    unrepairable); a wrong preserve only mis-sends a stale leftover that fails
+    loudly and self-heals on the next catalog warm. So cold → preserve for BOTH
+    a first-party-looking prefix and an unknown one.
     """
-    # first-party redundant prefix → strip (matches pre-fix / #433 cold path)
+    # first-party-looking prefix → PRESERVE (was: strip). This is the flip.
     model_a, _, _ = _resolve_with_catalog(
         'openai/gpt-5.4', advertised_ids=None,
         provider='custom', base_url='https://router.example.com/v1',
     )
-    assert model_a == 'gpt-5.4', f"cold first-party prefix must strip (legacy), got {model_a!r}"
-    # intrinsic/unknown prefix → preserve
+    assert model_a == 'openai/gpt-5.4', f"cold catalog must preserve verbatim, got {model_a!r}"
+    # intrinsic/unknown prefix → preserve (unchanged)
     model_b, _, _ = _resolve_with_catalog(
         'zai-org/GLM-5.1', advertised_ids=None,
         provider='custom', base_url='https://api.deepinfra.com/v1/openai',
@@ -405,36 +409,38 @@ def test_custom_remote_foreign_profile_catalog_ignored_5979():
     """Profile-isolation fail-safe: when the catalog snapshot's source
     fingerprint does NOT match the current runtime (a concurrently-active
     foreign profile published it), that snapshot is NOT trusted for provenance —
-    resolution falls back to the legacy family heuristic instead of stripping
-    against another profile's catalog.
+    the id is preserved verbatim instead of stripped against another profile's
+    catalog.
 
-    Proof id: ``zai-org/GLM-5.1``. The foreign snapshot advertises a bare
-    ``GLM-5.1`` (which, if trusted, would strip the prefix), but ``zai-org`` is
-    NOT a first-party provider, so the legacy fallback preserves the full id.
-    A result of ``zai-org/GLM-5.1`` therefore proves the foreign catalog was
-    ignored (a trusted-catalog strip would have returned ``GLM-5.1``).
+    Proof id: ``openai/gpt-5.4`` with the FOREIGN catalog advertising ONLY the
+    bare ``gpt-5.4``. If the foreign catalog were (wrongly) trusted, the
+    bare-only-advertised rule would strip → ``gpt-5.4``. Because the fingerprint
+    mismatches, the snapshot is ignored and resolution takes the cold-preserve
+    default → ``openai/gpt-5.4``. The two outcomes genuinely diverge, so a result
+    of ``openai/gpt-5.4`` proves the foreign catalog was ignored (not merely that
+    the prefix was unknown).
     """
     old_cache = config._available_models_cache
     old_memo = config._advertised_model_ids_memo
     old_fp = config._available_models_cache_source_fingerprint
     old_prov = config._models_cache_provenance
     config._available_models_cache = {
-        'groups': [{'provider_id': 'custom', 'models': [{'id': 'GLM-5.1', 'label': 'GLM-5.1'}]}]
+        'groups': [{'provider_id': 'custom', 'models': [{'id': 'gpt-5.4', 'label': 'gpt-5.4'}]}]
     }
     config._available_models_cache_source_fingerprint = {'config_yaml': {'path': '/some/other/profile'}}
     config._advertised_model_ids_memo = None
     config._sync_models_cache_provenance()
     try:
         model, _, _ = _resolve_with_config(
-            'zai-org/GLM-5.1', provider='custom', base_url='https://relay.example/v1',
+            'openai/gpt-5.4', provider='custom', base_url='https://relay.example/v1',
         )
     finally:
         config._available_models_cache = old_cache
         config._advertised_model_ids_memo = old_memo
         config._available_models_cache_source_fingerprint = old_fp
         config._models_cache_provenance = old_prov
-    assert model == 'zai-org/GLM-5.1', (
-        f"foreign-profile catalog must be ignored (legacy fallback preserves), got {model!r}"
+    assert model == 'openai/gpt-5.4', (
+        f"foreign-profile catalog must be ignored (cold-preserve default), got {model!r}"
     )
 
 
@@ -482,6 +488,132 @@ def test_resolver_provenance_read_does_not_block_on_cache_lock_5979():
         config.cfg.clear()
         config.cfg.update(old_cfg)
         config.invalidate_models_cache()
+
+
+def test_b3nw_cold_nondeclared_custom_slug_preserves_full_id_5979():
+    """#5979 (reopened, b3nw's exact case): a NON-declared model actively
+    selected on a ``custom:<slug>`` proxy is preserved on a COLD catalog.
+
+    b3nw's config: ``provider: custom:llm-proxy``, ``model.default: x-ai/grok-4.5``,
+    NO ``models[]`` allowlist. He picks ``x-ai/grok-composer-2.5-fast`` in the UI
+    (not his default). On a cold send the old code stripped it to
+    ``grok-composer-2.5-fast`` via the legacy family heuristic (the model had
+    graduated into the x-ai first-party catalog), and his proxy 400'd. The flip
+    to cold-preserve fixes it. grok-composer-2.5-fast is stubbed into
+    ``_PROVIDER_MODELS['x-ai']`` (as test_custom_remote_preserves_advertised_full_id_5979
+    does) so the first-party trigger is reproduced deterministically regardless
+    of the agent catalog version.
+    """
+    mid = 'x-ai/grok-composer-2.5-fast'
+    bare = 'grok-composer-2.5-fast'
+    xai = list(config._PROVIDER_MODELS.get('x-ai') or [])
+    had = any(isinstance(m, dict) and m.get('id') == bare for m in xai)
+    old_xai = config._PROVIDER_MODELS.get('x-ai')
+    old_cfg = dict(config.cfg)
+    old_prov = config._models_cache_provenance
+    old_cache = config._available_models_cache
+    if not had:
+        config._PROVIDER_MODELS['x-ai'] = xai + [{'id': bare, 'label': 'Grok Composer 2.5 Fast'}]
+    config.cfg.clear()
+    config.cfg.update({
+        'model': {'default': 'x-ai/grok-4.5', 'provider': 'custom:llm-proxy',
+                  'base_url': 'https://proxy.example/v1'},
+        'custom_providers': [{'name': 'llm-proxy', 'base_url': 'https://proxy.example/v1',
+                              'key_env': 'LLM_PROXY_API_KEY'}],
+    })
+    config._available_models_cache = None  # COLD
+    config._advertised_model_ids_memo = None
+    config._sync_models_cache_provenance()
+    try:
+        assert config._is_first_party_model('x-ai', bare), "precondition: stub failed"
+        model, provider, _ = config.resolve_model_provider(mid)
+    finally:
+        if not had:
+            if old_xai is None:
+                config._PROVIDER_MODELS.pop('x-ai', None)
+            else:
+                config._PROVIDER_MODELS['x-ai'] = old_xai
+        config.cfg.clear()
+        config.cfg.update(old_cfg)
+        config._models_cache_provenance = old_prov
+        config._available_models_cache = old_cache
+    assert model == mid, f"b3nw's non-declared cold custom-proxy pick must preserve, got {model!r}"
+    assert provider == 'custom:llm-proxy'
+
+
+def test_warm_models_catalog_provenance_if_cold_publishes_from_disk_5979():
+    """The send-path warm helper publishes provenance from a valid disk cache
+    when memory is cold — restoring the endpoint-advertised signal so #433
+    strips and #5979 preserves — WITHOUT a live rebuild.
+    """
+    old_cfg = dict(config.cfg)
+    config.cfg.clear()
+    config.cfg.update({
+        'model': {'default': 'x-ai/grok-4.5', 'provider': 'custom:llm-proxy',
+                  'base_url': 'https://proxy.example/v1'},
+        'custom_providers': [{'name': 'llm-proxy', 'base_url': 'https://proxy.example/v1',
+                              'key_env': 'LLM_PROXY_API_KEY',
+                              'models': ['x-ai/grok-4.5', 'x-ai/grok-composer-2.5-fast']}],
+    })
+    try:
+        # Build + persist to disk, then simulate a cold memory cache (restart).
+        config.invalidate_models_cache()
+        config.get_available_models()  # publishes to memory + disk
+        assert config._models_cache_provenance is not None
+        # Simulate cold memory but valid disk cache (do NOT delete disk).
+        config._available_models_cache = None
+        config._advertised_model_ids_memo = None
+        config._sync_models_cache_provenance()
+        assert config._models_cache_provenance is None, "precondition: memory cold"
+        # The warm helper should republish provenance from disk (network-free).
+        config.warm_models_catalog_provenance_if_cold()
+        assert config._models_cache_provenance is not None, (
+            "warm helper must publish provenance from the disk cache"
+        )
+        adv = config._endpoint_advertised_model_ids('custom:llm-proxy')
+        assert adv and 'x-ai/grok-composer-2.5-fast' in adv, (
+            f"warmed provenance must carry the endpoint-advertised ids, got {adv!r}"
+        )
+    finally:
+        config.cfg.clear()
+        config.cfg.update(old_cfg)
+        config.invalidate_models_cache()
+
+
+def test_warm_models_catalog_provenance_noop_when_already_warm_5979():
+    """The warm helper is a cheap no-op (single global read) when provenance is
+    already published — it must not rebuild or mutate a warm catalog.
+    """
+    sentinel = ({'groups': []}, {'config_yaml': {'path': '/x'}})
+    old_prov = config._models_cache_provenance
+    config._models_cache_provenance = sentinel
+    try:
+        config.warm_models_catalog_provenance_if_cold()
+        assert config._models_cache_provenance is sentinel, (
+            "warm helper must not touch an already-warm provenance tuple"
+        )
+    finally:
+        config._models_cache_provenance = old_prov
+
+
+def test_warm_models_catalog_provenance_never_live_rebuilds_5979(monkeypatch):
+    """The warm helper must call get_available_models with prefer_cache=True so
+    it can never trigger a live provider probe on the send path.
+    """
+    old_prov = config._models_cache_provenance
+    config._models_cache_provenance = None
+    captured = {}
+    def _fake_get_available_models(*, prefer_cache=False, force_refresh=False):
+        captured['prefer_cache'] = prefer_cache
+        captured['force_refresh'] = force_refresh
+        return {'groups': []}
+    monkeypatch.setattr(config, 'get_available_models', _fake_get_available_models)
+    try:
+        config.warm_models_catalog_provenance_if_cold()
+    finally:
+        config._models_cache_provenance = old_prov
+    assert captured.get('prefer_cache') is True, "warm must use prefer_cache=True (no live rebuild)"
+    assert captured.get('force_refresh') is False, "warm must never force_refresh"
 
 
 def test_custom_remote_preserves_unknown_prefix_548():

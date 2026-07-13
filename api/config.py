@@ -2898,15 +2898,24 @@ def resolve_model_provider(model_id: str) -> tuple:
                     return model_id, config_provider, config_base_url
                 # (3) Provenance genuinely unavailable (cold/unbuilt or
                 #     fingerprint-mismatched catalog AND not config-declared).
-                #     Fall back to the LEGACY family heuristic so this narrow edge
-                #     is never WORSE than the pre-fix behaviour: a first-party
-                #     redundant prefix still strips (#433 relay works cold), while
-                #     an intrinsic/unknown prefix (bedrock/opus-4-6 #3872,
-                #     zai-org/GLM-5.1 #548) is preserved. The #5979 active-user
-                #     path can't reach here — a selected id is either config-
-                #     declared or in the catalog the dropdown was built from.
-                if prefix in _PROVIDER_MODELS and _is_first_party_model(prefix, bare):
-                    return bare, config_provider, config_base_url
+                #     PRESERVE the id verbatim. For an EXPLICIT ``custom`` /
+                #     ``custom:<slug>`` proxy the safe default is to send exactly
+                #     what the user selected — a wrong strip destroys a namespace
+                #     the proxy routes on (recurs every turn, unrepairable by the
+                #     user short of declaring every model in config), while a wrong
+                #     preserve only mis-sends a stale cross-provider leftover that
+                #     fails LOUDLY (the relay rejects it; #5940 surfaces the real
+                #     error) and self-heals the instant the catalog warms. The strip
+                #     (#433) now requires POSITIVE provenance that the endpoint
+                #     advertises ONLY the bare id (case 2 above) — it is no longer
+                #     the cold default. This also honours the documented contract
+                #     of _endpoint_advertised_model_ids ("None → preserve verbatim")
+                #     and removes the data-driven flaw where a model graduating into
+                #     the static first-party catalog silently flipped routing
+                #     (exactly how #5979 regressed). The send path additionally
+                #     warms provenance network-free from the disk cache
+                #     (warm_models_catalog_provenance_if_cold) so this cold branch
+                #     is reached only in the narrow no-disk-cache window.
                 return model_id, config_provider, config_base_url
             # Non-custom first-party provider pointed at an OpenAI-compatible
             # proxy (e.g. provider=openai + base_url=litellm): the bare id is
@@ -8160,6 +8169,41 @@ def _models_cache_file_age_seconds(cache_path: Path, now: float) -> float | None
         return max(0.0, now - cache_path.stat().st_mtime)
     except OSError:
         return None
+
+
+def warm_models_catalog_provenance_if_cold() -> None:
+    """Best-effort, network-free publish of catalog provenance when memory is cold.
+
+    The send path (``api/streaming.py``) resolves the wire model via
+    ``resolve_model_provider`` without ever building the models catalog, and the
+    #1855 chat/start fast path deliberately skips the catalog when a session
+    already carries a persisted model+provider — so "cold at send" is the
+    designed behaviour after any process restart, memory-TTL expiry, or cache
+    invalidation, not a rare race. In that state the custom-proxy provenance
+    signal (``_endpoint_advertised_model_ids``) is ``None`` and resolution falls
+    to the cold-preserve default; this helper restores the endpoint-advertised
+    signal from the durable disk cache so the #433 bare-only-strip stays exact
+    and #5979 full-id preserve is backed by real provenance rather than the
+    fail-safe default.
+
+    Contract: ``prefer_cache=True`` resolves fresh-memory → valid-disk-cache
+    (which publishes provenance) → minimal static catalog (which deliberately
+    does NOT publish provenance, so a config-derived catalog can never
+    masquerade as endpoint evidence). It NEVER triggers a live provider rebuild,
+    so there is no network latency or flaky-network stall. Costs one global read
+    when already warm and a single ~sub-millisecond disk load once per cold
+    window. MUST be called from a request/worker context that does NOT hold
+    ``_cfg_lock`` (``get_available_models`` takes ``_available_models_cache_lock``
+    and may ``reload_config()`` → ``_cfg_lock``; calling it under ``_cfg_lock``
+    would invert the lock order). The send path satisfies this — it runs on the
+    detached worker thread with no config lock held.
+    """
+    if _models_cache_provenance is not None:
+        return  # already warm — one global read, no work
+    try:
+        get_available_models(prefer_cache=True)
+    except Exception:
+        logger.debug("models catalog provenance warm failed", exc_info=True)
 
 
 def get_available_models_for_session_visit() -> dict:

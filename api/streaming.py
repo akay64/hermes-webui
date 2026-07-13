@@ -37,6 +37,7 @@ from api.config import (
     resolve_model_provider,
     resolve_custom_provider_connection,
     model_with_provider_context,
+    warm_models_catalog_provenance_if_cold,
     load_settings,
     parse_reasoning_effort,
     coerce_reasoning_effort_for_model,
@@ -7890,6 +7891,13 @@ def _run_agent_streaming(
             # Initialize SessionDB so session_search works in WebUI sessions
             _state_db_path = (Path(_profile_home) / "state.db") if _profile_home else None
             _session_db = _build_session_db_for_stream(_state_db_path)
+            # #5979: publish catalog provenance from the durable disk cache when
+            # memory is cold, so the custom-proxy resolver below sees the
+            # endpoint-advertised model ids (network-free, never live-rebuilds,
+            # no _cfg_lock held on this worker thread). Without this the resolver
+            # falls to the cold-preserve default; with it, #433 bare-only-strip
+            # stays exact and #5979 full-id preserve is provenance-backed.
+            warm_models_catalog_provenance_if_cold()
             resolved_model, resolved_provider, resolved_base_url = resolve_model_provider(
                 model_with_provider_context(model, provider_context)
             )
