@@ -3124,13 +3124,21 @@ function _messageReloadLimitForSession(sid){
   const hint=_sameSessionForceReloadHint;
   if(hint&&hint.session_id===sid){
     const loadedRenderableCount=Math.max(0,Number(hint.loaded_renderable_count)||0);
+    // S.messages also contains hidden role:"tool" rows. `msg_limit` is a
+    // renderable-row budget, so raw array length must never widen a mutation
+    // reload window (a 30-row view with 30 tool rows would otherwise request
+    // 60 visible rows on /undo or /retry).
     const loadedMessageCount=Math.max(0,Number(hint.loaded_message_count)||0);
     if(loadedRenderableCount>0 || loadedMessageCount>0){
       if(!hint.truncated) return null;
       const previousMessageCount=Math.max(0,Number(hint.message_count)||0);
       const currentMessageCount=Math.max(0,Number(S.session&&S.session.session_id===sid&&S.session.message_count)||0);
       const appendedMessageCount=Math.max(0,currentMessageCount-previousMessageCount);
-      return Math.max(_INITIAL_MSG_LIMIT,loadedRenderableCount,loadedMessageCount+appendedMessageCount);
+      return Math.max(
+        _INITIAL_MSG_LIMIT,
+        loadedRenderableCount,
+        loadedRenderableCount+appendedMessageCount
+      );
     }
   }
   // Recovery callers such as refreshSession() do not pass through the
