@@ -5817,7 +5817,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
             ? _settledDoneInflightSnapshot.toolCalls
             : (Array.isArray(S.toolCalls)?S.toolCalls.map(tc=>({...tc})):[]);
           try{
-            _settledDoneWindow=await _fetchSettledSessionMessageWindow(activeSid,completedSession);
+            _settledDoneWindow=await _fetchSettledSessionMessageWindow(completedSid,completedSession);
           }catch(_settledWindowError){
             _settledDoneWindowFailed=true;
             if(typeof console!=='undefined'&&console.warn){

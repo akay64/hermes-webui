@@ -27,7 +27,7 @@ def _compact(text: str) -> str:
 def test_done_handler_uses_canonical_settled_window_offset():
     """The done handler must use the server-owned bounded window when needed."""
     compact = _compact(MESSAGES_JS)
-    assert "_settledDoneWindow=await_fetchSettledSessionMessageWindow(activeSid,completedSession)" in compact, (
+    assert "_settledDoneWindow=await_fetchSettledSessionMessageWindow(completedSid,completedSession)" in compact, (
         "done handler should refresh a canonical bounded window for paginated sessions"
     )
     assert "_messagesTruncated=_settledDoneWasTruncated" in compact, (

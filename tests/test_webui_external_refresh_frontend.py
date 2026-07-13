@@ -447,7 +447,8 @@ def test_same_session_force_reload_keeps_loaded_transcript_width_hint():
     assert "function _messageReloadLimitForSession(sid)" in SESSIONS_JS
     assert "if(!hint.truncated) return null;" in SESSIONS_JS
     assert "const appendedMessageCount=Math.max(0,currentMessageCount-previousMessageCount);" in SESSIONS_JS
-    assert "return Math.max(_INITIAL_MSG_LIMIT,loadedRenderableCount,loadedMessageCount+appendedMessageCount);" in SESSIONS_JS
+    assert "loadedRenderableCount+appendedMessageCount" in SESSIONS_JS
+    assert "loadedMessageCount+appendedMessageCount" not in SESSIONS_JS
     assert "const reloadLimit = _messageReloadLimitForSession(sid);" in SESSIONS_JS
     # The width hint is applied only when it stays within the server msg_limit
     # ceiling; an over-ceiling hint would be clamped by the backend and could

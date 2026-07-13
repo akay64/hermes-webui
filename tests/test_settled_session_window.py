@@ -155,9 +155,91 @@ console.log(JSON.stringify({
     assert outcome == {"expanded": 90, "initial": 30}
 
 
+def test_mutation_reload_uses_renderable_width_not_hidden_tool_rows():
+    outcome = _node_driver(
+        _EXTRACT
+        + r"""
+const _INITIAL_MSG_LIMIT = 30;
+let _messagesTruncated = true;
+let _sameSessionForceReloadHint = null;
+let loadedRenderable = 30;
+const S = {
+  messages: [
+    ...Array.from({length: 30}, () => ({role: 'assistant', content: 'visible'})),
+    ...Array.from({length: 30}, () => ({role: 'tool', content: 'hidden'})),
+  ],
+  session: {session_id: 'sid-1', message_count: 300},
+};
+function _currentLoadedRenderableMessageCount() { return loadedRenderable; }
+eval(extractFunction('_captureSameSessionForceReloadHint'));
+eval(extractFunction('_messageReloadLimitForSession'));
+_captureSameSessionForceReloadHint('sid-1');
+const beforeUndo = _messageReloadLimitForSession('sid-1');
+S.session.message_count = 299;
+const afterUndo = _messageReloadLimitForSession('sid-1');
+console.log(JSON.stringify({beforeUndo, afterUndo}));
+"""
+    )
+
+    assert outcome == {"beforeUndo": 30, "afterUndo": 30}
+
+
+def test_rotated_done_window_uses_continuation_session_data():
+    compact = "".join(MESSAGES_JS.split())
+    done_start = MESSAGES_JS.index("source.addEventListener('done'")
+    done_end = MESSAGES_JS.index("source.addEventListener('stream_end'", done_start)
+    done_body = "".join(MESSAGES_JS[done_start:done_end].split())
+    completed_sid_idx = done_body.index("constcompletedSid=completedSession.session_id||activeSid;")
+    fetch_idx = done_body.index("_settledDoneWindow=await_fetchSettledSessionMessageWindow")
+    assert completed_sid_idx < fetch_idx
+    assert "_settledDoneWindow=await_fetchSettledSessionMessageWindow(completedSid,completedSession)" in compact
+    assert "_settledDoneWindow=await_fetchSettledSessionMessageWindow(activeSid,completedSession)" not in done_body
+
+    outcome = _node_driver(
+        r"""
+const activeSid = 'parent-session';
+const completedSession = {session_id: 'continuation-session', message_count: 101};
+const completedSid = completedSession.session_id || activeSid;
+const windows = {
+  'parent-session': {
+    messages: [{role: 'assistant', content: 'STALE PARENT WINDOW'}],
+    tool_calls: [{id: 'parent-tool'}],
+    _messages_truncated: true,
+    _messages_offset: 70,
+  },
+  'continuation-session': {
+    messages: [{role: 'assistant', content: 'FINAL ANSWER'}],
+    tool_calls: [{id: 'continuation-tool'}],
+    _messages_truncated: true,
+    _messages_offset: 70,
+  },
+};
+async function _fetchSettledSessionMessageWindow(sid) {
+  return windows[sid];
+}
+(async()=>{
+  const _settledDoneWindow = await _fetchSettledSessionMessageWindow(completedSid, completedSession);
+  const settled = {
+    session_id: completedSid,
+    messages: _settledDoneWindow.messages,
+    tool_calls: _settledDoneWindow.tool_calls,
+    _messages_offset: _settledDoneWindow._messages_offset,
+  };
+  console.log(JSON.stringify(settled));
+})().catch(err=>{ console.error(err.stack || err); process.exit(1); });
+"""
+    )
+    assert outcome == {
+        "session_id": "continuation-session",
+        "messages": [{"role": "assistant", "content": "FINAL ANSWER"}],
+        "tool_calls": [{"id": "continuation-tool"}],
+        "_messages_offset": 70,
+    }
+
+
 def test_done_and_recovery_paths_do_not_expand_the_render_window():
     compact = "".join(MESSAGES_JS.split())
-    assert "_fetchSettledSessionMessageWindow(activeSid,completedSession)" in compact
+    assert "_fetchSettledSessionMessageWindow(completedSid,completedSession)" in compact
     assert "_settledSessionMessageWindowUrl(activeSid,null,{reserveNewTurn:true,forceBounded:true})" in compact
     assert "_messagesTruncated=!!session._messages_truncated" in compact
     assert "_messageRenderWindowSize=Math.max(typeof _currentMessageRenderWindowSize" not in compact
@@ -174,7 +256,7 @@ def test_done_and_recovery_paths_do_not_expand_the_render_window():
 def test_settled_window_helpers_and_cross_module_callers_are_present():
     assert "function _settledSessionMessageWindowLimit" in SESSIONS_JS
     assert "async function _fetchSettledSessionMessageWindow" in SESSIONS_JS
-    assert "_fetchSettledSessionMessageWindow(activeSid,completedSession)" in MESSAGES_JS
+    assert "_fetchSettledSessionMessageWindow(completedSid,completedSession)" in MESSAGES_JS
 
 
 def test_reconnect_refresh_uses_a_bounded_session_window():
