@@ -21,6 +21,10 @@
 
 - **New chats honor your agent's `worktree:` config default.** If your agent config sets a `worktree:` default, a deliberate New Chat now inherits it (matching TUI behavior). System-created sessions — boot auto-bind, profile switches, workspace binding, file/folder creation, terminal sessions — never inherit it, so simply opening the UI can't spawn a stray worktree + branch. An explicit request flag always wins over the config default, and the config value is read strictly (only a real `true` opts in; anything else is safely ignored). Thanks @ayxuerui. (#6029, #6022)
 
+### Performance
+
+- **Faster session reconciliation for large histories.** When the WebUI reconciles a session against the agent's `state.db`, it now uses a cheap prefix-count check to skip the expensive full identity-key materialization whenever the two prefixes provably can't match — falling back to the full comparison whenever a match can't be ruled out (null timestamps, equal counts, ties, or a locked/unreadable db all take the safe full path). No change to which sessions or messages are shown. Thanks @Isla-Liu. (#6014)
+
 - **Send-to-first-token latency (TTFT) is now measured.** Each streamed turn records how long it took from send to the first visible token (`ttft_ms`), surfaced in metering stats and as a `_firstTokenMs` diagnostic on the message. Measurement-only — computed once on the first token with no added latency on the streaming hot path, and existing token/usage/cost metering is unchanged. Thanks @rodboev. (#6042, #6006)
 
 - **"Approve once" no longer silently sticks for the whole session.** On local (non-gateway) deployments, choosing **Approve once** on a tool approval prompt was wrongly persisting as a session-wide approval, so the next matching guarded tool call skipped its approval card. "Once" now applies to only the single call that prompted it, and the next matching call re-prompts as intended; "Approve for session" and "Always allow" are unchanged. Thanks @rudidev08. (#6035, #6017)
