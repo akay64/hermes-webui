@@ -4,7 +4,7 @@ from pathlib import Path
 
 
 BOOT_JS = (Path(__file__).parent.parent / "static" / "boot.js").read_text(encoding="utf-8")
-CHORD = "(e.metaKey||e.ctrlKey)&&!e.altKey&&!e.shiftKey&&(e.key==='/'||e.code==='Slash')"
+CHORD = "(e.metaKey||e.ctrlKey)&&!e.altKey&&e.key==='/'"
 CTRL_K = "(e.metaKey||e.ctrlKey)&&e.key==='k'"
 
 
@@ -34,8 +34,11 @@ def _ctrl_k_branch() -> str:
 
 def test_composer_focus_chord_uses_cmd_ctrl_slash_and_stays_before_ctrl_k():
     assert CHORD in BOOT_JS
-    assert "&&e.altKey&&!e.shiftKey&&(e.key==='/'||e.code==='Slash')" not in BOOT_JS
-    assert "e.code==='Slash'" in BOOT_JS
+    # Must key off the '/' CHARACTER, never the physical Slash code — on QWERTZ
+    # the Slash key produces Ctrl+- (browser zoom-out) and '/' is Shift+7.
+    assert "e.code==='Slash'" not in BOOT_JS
+    # No shiftKey exclusion — a layout-shifted '/' (e.g. Shift+7) must still match.
+    assert "!e.shiftKey&&e.key==='/'" not in BOOT_JS
     assert BOOT_JS.index("(e.metaKey||e.ctrlKey)&&!e.shiftKey&&!e.altKey&&(e.key==='b'||e.key==='B')") < BOOT_JS.index(CHORD)
     assert BOOT_JS.index(CHORD) < BOOT_JS.index(CTRL_K)
 

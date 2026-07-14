@@ -2321,7 +2321,11 @@ document.addEventListener('keydown',async e=>{
     }
   }
   // Cmd/Ctrl+/ focuses the message composer without creating a chat.
-  if((e.metaKey||e.ctrlKey)&&!e.altKey&&!e.shiftKey&&(e.key==='/'||e.code==='Slash')){
+  // Match on the '/' CHARACTER (e.key), not the physical key position: on QWERTZ
+  // layouts the physical Slash key produces Ctrl+- (browser zoom-out) and '/' is
+  // typed as Shift+7, so matching the physical code both steals zoom and misses
+  // the real '/' chord. e.key==='/' is layout-correct on every keyboard.
+  if((e.metaKey||e.ctrlKey)&&!e.altKey&&e.key==='/'){
     const t=e.target;
     const isText=t&&(t.tagName==='INPUT'||t.tagName==='TEXTAREA'||t.isContentEditable);
     if(isText) return;
