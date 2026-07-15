@@ -69,6 +69,8 @@
 
 ### Fixed
 
+- **Streaming sidebar polls no longer re-run the expensive CLI/cron projection every few seconds.** The per-stream cache TTL was pinned at 30s while the frontend's streaming sidebar poll cadence could approach it, so the state.db CLI/cron projection (and its ~200 sidecar reads) could be re-paid on nearly every poll during a live turn (the #4842/#4808 high-CPU `get_cli_sessions` case). The streaming TTL is now held strictly above the sidebar poll interval (45s) and paired with the stable streaming cache key, so repeated polls reuse the projection; a new test asserts the TTL stays above the poll cadence so this can't silently regress. Thanks @starship-s. (#6102, #4842)
+
 - **Delegated subagent sessions in the sidebar now show a meaningful title instead of "Subagent Session".** Generic delegated child sessions previously all displayed the placeholder "Subagent Session" in the conversations list, making them indistinguishable. Their sidebar title is now derived (view-only) from the child's first user message during the existing batched sidebar-metadata pass — without mutating the stored session title, so the read-only boundary is preserved. Only generic "Subagent Session" placeholders are affected; custom titles are left untouched. Thanks @rodboev. (#6056, #6033)
 
 - **Manual "Check for updates" now works even when automatic update checks are turned off.** Previously, disabling automatic update checks in Preferences → System also disabled the manual "check now" button, leaving no way to update from the WebUI without re-enabling the (noisy) automatic banner. The explicit manual force-check now bypasses the disabled auto-check toggle; the automatic path still honors the setting. Thanks @webtecnica. (#6088, #6082)
