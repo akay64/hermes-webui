@@ -17024,6 +17024,7 @@ function renderMessages(options){
       group._deferredWorklogDisclosure=worklogDetailDisclosureState;
     });
   }
+  _messageVirtualWindowKey=renderWindowKey;
   // Render per-turn duration and optional token usage on assistant messages.
   // Duration stays visible even when token usage is disabled, because it answers
   // the basic "how long did that turn take?" UX question. Only walk rendered
