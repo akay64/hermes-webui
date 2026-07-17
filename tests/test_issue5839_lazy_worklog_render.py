@@ -102,3 +102,18 @@ def test_rebuild_stashes_disclosure_on_deferred_groups():
     assert "group._deferredWorklogDisclosure=worklogDetailDisclosureState;" in UI_JS
     # stash happens right after the main restore pass over the rebuilt transcript
     assert 'querySelectorAll(\'[data-worklog-rows-deferred="1"]\')' in UI_JS
+
+
+def test_full_rebuild_commits_the_rendered_virtual_window_key():
+    """The lazy-worklog disclosure block must not swallow the normal-path
+    virtual-window commit. Without it, every scroll notification sees a stale
+    key and rebuilds the entire transcript forever while the page is visible."""
+    body = _function_body(UI_JS, "renderMessages")
+    disclosure_stash = body.index("group._deferredWorklogDisclosure=worklogDetailDisclosureState;")
+    duration_pass = body.index("// Render per-turn duration", disclosure_stash)
+    key_commit = body.index("_messageVirtualWindowKey=renderWindowKey;", disclosure_stash)
+
+    assert disclosure_stash < key_commit < duration_pass
+    # One assignment belongs to the HTML-cache fast path; the second commits a
+    # normal full rebuild. Both paths must advertise the DOM window they mounted.
+    assert body.count("_messageVirtualWindowKey=renderWindowKey;") == 2
