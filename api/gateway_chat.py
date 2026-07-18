@@ -360,7 +360,7 @@ def _run_gateway_runs_api_streaming(
     session_id, msg_text, model, workspace, stream_id,
     base_url, api_key, prefill_messages, body_extras,
     *, put_gateway_event, cancel_event,
-    attachments=None, cfg=None, session=None,
+    attachments=None, cfg=None, session=None, model_provider=None,
 ):
     """Submit via POST /v1/runs and relay SSE events including approval."""
     url_runs = f"{base_url.rstrip('/')}/v1/runs"
@@ -377,7 +377,15 @@ def _run_gateway_runs_api_streaming(
         try:
             from api.streaming import _build_native_multimodal_message
 
-            message_content = _build_native_multimodal_message("", str(msg_text or ""), attachments, str(workspace), cfg=cfg)
+            message_content = _build_native_multimodal_message(
+                "",
+                str(msg_text or ""),
+                attachments,
+                str(workspace),
+                cfg=cfg,
+                effective_provider=model_provider,
+                effective_model=model,
+            )
         except Exception:
             logger.debug("Failed to build runs-API multimodal attachment payload", exc_info=True)
             message_content = str(msg_text or "")
@@ -790,6 +798,7 @@ def _run_gateway_chat_streaming(
                     attachments=attachments,
                     cfg=cfg,
                     session=s,
+                    model_provider=model_provider,
                 )
             except Exception as exc:
                 error_payload = _settle_gateway_terminal_error(
@@ -841,7 +850,15 @@ def _run_gateway_chat_streaming(
                 try:
                     from api.streaming import _build_native_multimodal_message
 
-                    message_content = _build_native_multimodal_message("", str(msg_text or ""), attachments, str(workspace), cfg=cfg)
+                    message_content = _build_native_multimodal_message(
+                        "",
+                        str(msg_text or ""),
+                        attachments,
+                        str(workspace),
+                        cfg=cfg,
+                        effective_provider=model_provider,
+                        effective_model=model,
+                    )
                 except Exception:
                     logger.debug("Failed to build gateway multimodal attachment payload", exc_info=True)
                     message_content = str(msg_text or "")

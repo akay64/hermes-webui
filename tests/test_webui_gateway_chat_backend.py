@@ -1238,8 +1238,12 @@ def _install_fake_agent_routing(monkeypatch, *, decision, supports,
     import types
 
     img = types.ModuleType("agent.image_routing")
-    img.decide_image_input_mode = lambda p, m, cfg: decision
-    img._lookup_supports_vision = lambda p, m, cfg=None: supports
+    img.decide_image_input_mode = (
+        decision if callable(decision) else lambda p, m, cfg: decision
+    )
+    img._lookup_supports_vision = (
+        supports if callable(supports) else lambda p, m, cfg=None: supports
+    )
     aux = types.ModuleType("agent.auxiliary_client")
     aux._read_main_provider = lambda: provider
     aux._read_main_model = lambda: model
@@ -1283,6 +1287,19 @@ def test_resolve_image_input_mode_known_text_only_routes_text(monkeypatch):
            "auxiliary": {"vision": {"provider": "auto"}}}
     assert streaming._resolve_image_input_mode(cfg) == "text"
 
+    # Route identity does not override positive evidence that the model is
+    # text-only; native-first is only the unknown-capability carve-out.
+    same_route_cfg = {
+        "agent": {"image_input_mode": "auto"},
+        "auxiliary": {
+            "vision": {
+                "provider": "customcorp",
+                "model": "mystery-9000",
+            }
+        },
+    }
+    assert streaming._resolve_image_input_mode(same_route_cfg) == "text"
+
 
 def test_resolve_image_input_mode_known_vision_model_forwards_native(monkeypatch):
     """A model KNOWN to support vision forwards natively (canonical native)."""
@@ -1291,24 +1308,101 @@ def test_resolve_image_input_mode_known_vision_model_forwards_native(monkeypatch
     assert streaming._resolve_image_input_mode(cfg) == "native"
 
 
+def test_resolve_image_input_mode_uses_session_model_before_profile_default(monkeypatch):
+    """A per-session vision model must receive pixels even when the profile's
+    default model is text-only and an auxiliary vision fallback is configured.
+
+    Before the effective route was threaded into the resolver, WebUI queried
+    the profile default and could make a vision-capable session model call
+    itself through ``vision_analyze`` instead of receiving native image parts.
+    """
+    seen = []
+
+    def decide(provider, model, cfg):
+        seen.append((provider, model))
+        if (provider, model) == ("opencode-go-curated", "mimo-v2.5"):
+            return "native"
+        return "text"
+
+    def supports(provider, model, cfg=None):
+        return (provider, model) == ("opencode-go-curated", "mimo-v2.5")
+
+    _install_fake_agent_routing(
+        monkeypatch,
+        decision=decide,
+        supports=supports,
+        provider="text-provider",
+        model="text-default",
+    )
+    cfg = {
+        "agent": {"image_input_mode": "auto"},
+        "auxiliary": {
+            "vision": {
+                "provider": "opencode-go-curated",
+                "model": "mimo-v2.5",
+            }
+        },
+    }
+
+    assert streaming._resolve_image_input_mode(
+        cfg,
+        effective_provider="opencode-go-curated",
+        effective_model="mimo-v2.5",
+    ) == "native"
+    assert seen == [("opencode-go-curated", "mimo-v2.5")]
+
+
 def test_resolve_image_input_mode_explicit_text_signal_honored(monkeypatch):
     """An explicit user choice for the text pipeline is honoured even for an
-    unknown model — the carve-out only fires when there is NO explicit signal.
-
-    Both an explicit ``agent.image_input_mode: text`` and a configured
-    ``auxiliary.vision`` backend count as explicit signals.
+    unknown model — the carve-out only fires when there is no direct override.
     """
     _install_fake_agent_routing(monkeypatch, decision="text", supports=None)
     assert streaming._resolve_image_input_mode(
         {"agent": {"image_input_mode": "text"}}) == "text"
+
+
+def test_resolve_image_input_mode_unknown_model_with_auxiliary_tries_native(monkeypatch):
+    """The same model must not call itself through the auxiliary tool.
+
+    Custom providers such as opencode-go-curated may not exist in models.dev,
+    so MiMo's capability is unknown even though the model supports vision. In
+    that case WebUI must try native pixels before falling back to the tool.
+    """
+    _install_fake_agent_routing(
+        monkeypatch,
+        decision="text",
+        supports=None,
+        provider="opencode-go-curated",
+        model="mimo-v2.5",
+    )
     assert streaming._resolve_image_input_mode(
         {"agent": {"image_input_mode": "auto"},
-         "auxiliary": {"vision": {"provider": "openai", "model": "gpt-4o"}}}) == "text"
+         "auxiliary": {"vision": {
+             "provider": "opencode-go-curated",
+             "model": "mimo-v2.5",
+         }}}) == "native"
+
+
+def test_resolve_image_input_mode_unknown_model_with_distinct_auxiliary_routes_text(monkeypatch):
+    """A distinct explicit auxiliary preserves Hermes' conservative fallback."""
+    _install_fake_agent_routing(
+        monkeypatch,
+        decision="text",
+        supports=None,
+        provider="customcorp",
+        model="mystery-9000",
+    )
+    assert streaming._resolve_image_input_mode(
+        {"agent": {"image_input_mode": "auto"},
+         "auxiliary": {"vision": {
+             "provider": "anthropic",
+             "model": "claude-vision",
+         }}}) == "text"
 
 
 def test_resolve_image_input_mode_fallback_when_agent_unavailable(monkeypatch):
     """When the agent package cannot be imported (standalone WebUI env), fall
-    back to historical WebUI behaviour: explicit text signal wins, else native.
+    back deterministically while still avoiding exact-route auxiliary self-calls.
     """
     import sys
 
@@ -1326,9 +1420,18 @@ def test_resolve_image_input_mode_fallback_when_agent_unavailable(monkeypatch):
     # Explicit text mode -> text.
     assert streaming._resolve_image_input_mode(
         {"agent": {"image_input_mode": "text"}}) == "text"
-    # Explicit auxiliary vision backend -> text.
+    # A distinct auxiliary backend preserves the conservative text fallback.
     assert streaming._resolve_image_input_mode(
         {"auxiliary": {"vision": {"provider": "anthropic"}}}) == "text"
+    # But an exact effective-route match avoids a pointless self-call.
+    assert streaming._resolve_image_input_mode(
+        {"auxiliary": {"vision": {
+            "provider": "opencode-go-curated",
+            "model": "mimo-v2.5",
+        }}},
+        effective_provider="opencode-go-curated",
+        effective_model="mimo-v2.5",
+    ) == "native"
 
 
 def test_gateway_use_runs_api_is_default_off():

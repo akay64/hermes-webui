@@ -2046,22 +2046,11 @@ def _is_valid_image(path: Path, mime: str) -> bool:
 
 
 def _explicit_text_signal(cfg: dict) -> bool:
-    """True when the user has explicitly opted into the text (vision_analyze)
-    image pipeline.
+    """True only for an explicit ``agent.image_input_mode: text`` override.
 
-    Two explicit signals, either of which means "the user chose text on
-    purpose" and we must honour it rather than forwarding images natively:
-
-      * ``agent.image_input_mode: text`` — a direct mode override.
-      * a configured ``auxiliary.vision`` backend (provider not ``auto``/empty,
-        or an explicit model / base_url) — the user is paying for a dedicated
-        vision model and wants the text pipeline regardless of the main model.
-
-    This mirrors the explicit-signal portion of
-    ``agent/image_routing.py:decide_image_input_mode`` and is used both to
-    interpret *why* the canonical router returned ``"text"`` (so the
-    unknown-model carve-out only fires when there's no explicit user choice)
-    and as the fallback decision when the agent package is unavailable.
+    Configuring ``auxiliary.vision`` merely makes a fallback available. It is
+    not evidence that the active main model lacks vision and therefore must not
+    suppress WebUI's native-first path for unknown/custom models.
     """
     if not isinstance(cfg, dict):
         return False
@@ -2070,17 +2059,56 @@ def _explicit_text_signal(cfg: dict) -> bool:
         mode = str(agent_cfg.get("image_input_mode", "auto") or "auto").strip().lower()
         if mode == "text":
             return True
+    return False
+
+
+def _configured_auxiliary_vision_route(cfg: dict) -> tuple[str, str] | None:
+    """Return the explicit auxiliary vision provider/model, or ``None``.
+
+    Empty/``auto`` defaults are not explicit. A base-URL-only configuration is
+    explicit but cannot match a main route, so it returns empty route fields.
+    """
+    if not isinstance(cfg, dict):
+        return None
     aux = cfg.get("auxiliary") or {}
     vision = (aux.get("vision") or {}) if isinstance(aux, dict) else {}
     if not isinstance(vision, dict):
-        return False
+        return None
     provider = str(vision.get("provider") or "").strip().lower()
-    model_name = str(vision.get("model") or "").strip()
+    model = str(vision.get("model") or "").strip().lower()
     base_url = str(vision.get("base_url") or "").strip()
-    return provider not in ("", "auto") or bool(model_name) or bool(base_url)
+    if provider in ("", "auto") and not model and not base_url:
+        return None
+    return provider, model
 
 
-def _resolve_image_input_mode(cfg: dict) -> str:
+def _auxiliary_vision_matches_main_route(cfg: dict, provider: str, model: str) -> bool:
+    """True when auxiliary vision would call the active model back into itself."""
+    aux_route = _configured_auxiliary_vision_route(cfg)
+    if aux_route is None:
+        return False
+    aux_provider, aux_model = aux_route
+    main_provider = str(provider or "").strip().lower()
+    main_model = str(model or "").strip().lower()
+    if aux_provider.startswith("custom:"):
+        aux_provider = aux_provider.split(":", 1)[1]
+    if main_provider.startswith("custom:"):
+        main_provider = main_provider.split(":", 1)[1]
+    return bool(
+        aux_provider
+        and aux_provider != "auto"
+        and aux_model
+        and aux_provider == main_provider
+        and aux_model == main_model
+    )
+
+
+def _resolve_image_input_mode(
+    cfg: dict,
+    *,
+    effective_provider: str | None = None,
+    effective_model: str | None = None,
+) -> str:
     """Return ``"native"`` or ``"text"`` for current-turn image uploads.
 
     Delegates the routing decision to ``agent/image_routing.py:
@@ -2098,23 +2126,36 @@ def _resolve_image_input_mode(cfg: dict) -> str:
     (``run_agent._try_shrink_image_parts_in_messages`` /
     ``_strip_images_from_messages``) to downgrade on a provider rejection. We
     preserve that behaviour here: a canonical ``"text"`` verdict is only
-    honoured when there is a real signal — an explicit user choice
-    (``image_input_mode: text`` or a configured ``auxiliary.vision`` backend)
-    or a model KNOWN to lack vision. Otherwise we forward native.
+    honoured for an explicit ``image_input_mode: text`` choice or a model KNOWN
+    to lack vision. For an unknown/custom model with an auxiliary route, WebUI
+    preserves the canonical conservative text verdict unless that auxiliary
+    route is the exact same provider/model as the main route; making a model
+    call itself through ``vision_analyze`` cannot add vision capability, so the
+    same-route case tries native pixels first.
+
+    ``effective_provider`` and ``effective_model`` must be supplied by chat
+    callers that support per-session model selection. Falling back to the
+    profile defaults is retained for legacy callers only; using those defaults
+    for a session override can incorrectly route a vision-capable model through
+    ``vision_analyze``.
 
     When the agent package is unavailable (e.g. the WebUI standalone test
-    environment, where ``import agent`` fails), we fall back to the historical
-    WebUI behaviour: honour an explicit text signal, otherwise native.
+    environment, where ``import agent`` fails), explicit text mode and distinct
+    auxiliary routes remain text-routed; an exact main/auxiliary match still
+    avoids the self-call and tries native first.
     """
     if not isinstance(cfg, dict):
         cfg = {}
 
     try:
         from agent.image_routing import decide_image_input_mode, _lookup_supports_vision
-        from agent.auxiliary_client import _read_main_provider, _read_main_model
+        provider = str(effective_provider or "").strip()
+        model = str(effective_model or "").strip()
+        if not provider or not model:
+            from agent.auxiliary_client import _read_main_provider, _read_main_model
 
-        provider = (_read_main_provider() or "").strip()
-        model = (_read_main_model() or "").strip()
+            provider = provider or str(_read_main_provider() or "").strip()
+            model = model or str(_read_main_model() or "").strip()
 
         mode = decide_image_input_mode(provider, model, cfg)
         if mode == "native":
@@ -2127,20 +2168,43 @@ def _resolve_image_input_mode(cfg: dict) -> str:
         if _lookup_supports_vision(provider, model, cfg) is False:
             # Model is KNOWN to be text-only — respect the canonical verdict.
             return "text"
+        if _configured_auxiliary_vision_route(cfg) is not None:
+            if _auxiliary_vision_matches_main_route(cfg, provider, model):
+                return "native"
+            # Unknown model with a distinct explicit auxiliary route: preserve
+            # the agent's conservative fallback decision.
+            return "text"
         # Unknown / custom model (capability is None): WebUI forwards native
         # and lets the agent's strip-and-retry guard downgrade on rejection.
         return "native"
     except Exception:
         # Agent package unavailable or import error — preserve historical WebUI
-        # behaviour: explicit text signal wins, otherwise native.
+        # behaviour: explicit text mode wins, otherwise native-first.
         pass
 
     if _explicit_text_signal(cfg):
         return "text"
+    if _configured_auxiliary_vision_route(cfg) is not None:
+        if _auxiliary_vision_matches_main_route(
+            cfg,
+            effective_provider or "",
+            effective_model or "",
+        ):
+            return "native"
+        return "text"
     return "native"
 
 
-def _build_native_multimodal_message(workspace_ctx: str, msg_text: str, attachments, workspace: str, *, cfg: dict = None):
+def _build_native_multimodal_message(
+    workspace_ctx: str,
+    msg_text: str,
+    attachments,
+    workspace: str,
+    *,
+    cfg: dict = None,
+    effective_provider: str | None = None,
+    effective_model: str | None = None,
+):
     """Build native multimodal content parts for current-turn image uploads.
 
     WebUI uploads files into the active workspace. For image files, pass the
@@ -2156,7 +2220,11 @@ def _build_native_multimodal_message(workspace_ctx: str, msg_text: str, attachme
         return workspace_ctx + msg_text
 
     # ── Check image_input_mode before embedding anything ──
-    if cfg is not None and _resolve_image_input_mode(cfg) == "text":
+    if cfg is not None and _resolve_image_input_mode(
+        cfg,
+        effective_provider=effective_provider,
+        effective_model=effective_model,
+    ) == "text":
         return workspace_ctx + msg_text
 
     parts = [{'type': 'text', 'text': workspace_ctx + msg_text}]
@@ -4069,7 +4137,11 @@ def _sanitize_messages_for_api(
     remaining replay gap where an older native image in the saved transcript kept
     causing 400s on every later text-only turn (#2297).
     """
-    strip_native_images = cfg is not None and _resolve_image_input_mode(cfg) == "text"
+    strip_native_images = cfg is not None and _resolve_image_input_mode(
+        cfg,
+        effective_provider=effective_provider,
+        effective_model=effective_model,
+    ) == "text"
     # First pass: collect all tool_call_ids declared by assistant messages.
     # Handles both OpenAI ('id') and Anthropic ('call_id') field names.
     valid_tool_call_ids: set = set()
@@ -8541,7 +8613,15 @@ def _run_agent_streaming(
             _agent_msg_text = msg_text
             if _process_notifications:
                 _agent_msg_text = "\n\n".join([*_process_notifications, msg_text]).strip()
-            user_message = _build_native_multimodal_message(workspace_ctx, _agent_msg_text, attachments, workspace, cfg=_cfg)
+            user_message = _build_native_multimodal_message(
+                workspace_ctx,
+                _agent_msg_text,
+                attachments,
+                workspace,
+                cfg=_cfg,
+                effective_provider=resolved_provider,
+                effective_model=resolved_model,
+            )
             _persistent_state_before = _persistent_state_snapshot(_profile_home)
             _run_conversation_kwargs = dict(
                 user_message=user_message,
