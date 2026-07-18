@@ -25,7 +25,7 @@ const COMMANDS=[
   {name:'steer',     desc:t('cmd_steer'),    fn:cmdSteer,     arg:'message', noEcho:true},
   {name:'title',     desc:t('cmd_title'),    fn:cmdTitle,    arg:'[title]'},
   {name:'retry',     desc:t('cmd_retry'),    fn:cmdRetry,     noEcho:true},
-  {name:'undo',      desc:t('cmd_undo'),     fn:cmdUndo,      noEcho:true},
+  {name:'undo',      desc:t('cmd_undo'),     fn:cmdUndo,      arg:'[N]', noEcho:true},
   {name:'btw',       desc:t('cmd_btw'),      fn:cmdBtw,       arg:'question', noEcho:true},
   {name:'background',desc:t('cmd_background'),fn:cmdBackground,arg:'prompt',  noEcho:true},
   {name:'status',    desc:t('cmd_status'),   fn:cmdStatus},
@@ -1708,15 +1708,25 @@ async function cmdRetry(){
   }catch(e){showToast(t('retry_failed')+e.message);}
 }
 async function cmdUndo(){
+  const args=arguments[0];
   if(!S.session){showToast(t('no_active_session'));return;}
   if(S.session.is_cli_session){showToast(t('cmd_webui_only_session'));return;}
   const activeSid=S.session.session_id;
+  let turns=1;
+  const rawArgs=String(args||'').trim();
+  if(rawArgs){
+    const countArg=rawArgs.split(/\s+/)[0];
+    if(!/^-?\d+$/.test(countArg)){showToast('Usage: /undo or /undo N');return;}
+    turns=Number.parseInt(countArg,10);
+    turns=Math.max(1,turns);
+  }
   try{
-    const r=await api('/api/session/undo',{method:'POST',body:JSON.stringify({session_id:activeSid})});
+    const r=await api('/api/session/undo',{method:'POST',body:JSON.stringify({session_id:activeSid,turns})});
     if(r&&r.error){showToast(r.error);return;}
     if(!S.session||S.session.session_id!==activeSid)return;
     await loadSession(activeSid,{force:true,keepStaleUntilLoaded:true,externalRefreshReason:'undo'});
     if(!S.session||S.session.session_id!==activeSid)return;
+    $('msg').value=r.removed_text||'';if(typeof autoResize==='function')autoResize();
     showToast(`↩ ${t('undid_n_messages')} ${r.removed_count} ${t('undid_messages_suffix')}`);
   }catch(e){showToast(t('undo_failed')+e.message);}
 }

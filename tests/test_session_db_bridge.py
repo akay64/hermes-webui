@@ -18,6 +18,9 @@ class _StateStore:
         self.archived = set()
         self.titles = {}
         self.fail_replace = False
+        self.replace_active_only = []
+        self.rewind_count = {}
+        self.reconcile_calls = []
 
 
 class _FakeSessionDB:
@@ -50,10 +53,30 @@ class _FakeSessionDB:
     def has_archived_messages(self, session_id):
         return session_id in self.store.archived
 
-    def replace_messages(self, session_id, messages):
+    def replace_messages(self, session_id, messages, active_only=False):
         if self.store.fail_replace:
             raise RuntimeError("simulated replace failure")
         self.store.messages[session_id] = copy.deepcopy(list(messages))
+        self.store.replace_active_only.append(bool(active_only))
+
+    def rewind_to_message(self, session_id, target_message_id):
+        messages = self.store.messages.get(session_id, [])
+        target_idx = next(
+            idx for idx, message in enumerate(messages)
+            if message.get("id") == target_message_id
+        )
+        removed = messages[target_idx:]
+        self.store.messages[session_id] = copy.deepcopy(messages[:target_idx])
+        self.store.rewind_count[session_id] = self.store.rewind_count.get(session_id, 0) + 1
+        return {"rewound_count": len(removed)}
+
+    def reconcile_active_transcript_for_rewind(self, session_id, messages):
+        previous = self.store.messages.get(session_id, [])
+        replacement = copy.deepcopy(list(messages))
+        self.store.messages[session_id] = replacement
+        self.store.reconcile_calls.append((session_id, replacement))
+        self.store.rewind_count[session_id] = self.store.rewind_count.get(session_id, 0) + 1
+        return {"rewound_count": len(previous), "inserted_count": len(replacement)}
 
     def set_session_title(self, session_id, title):
         self.store.titles[session_id] = title
@@ -238,6 +261,59 @@ def test_empty_branch_is_persisted_as_durable_child(bridge_env):
     payload = json.loads(child.path.read_text(encoding="utf-8"))
     assert payload["messages"] == []
     assert payload["context_messages"] == []
+
+
+def test_active_replacement_uses_active_only_and_preserves_sidecar(bridge_env):
+    store, _ = bridge_env
+    from api.session_db_bridge import replace_webui_active_transcript
+
+    session = _session("replace-source", _messages("display", 4), _messages("context", 4))
+    store.sessions[session.session_id] = {"id": session.session_id, "source": "webui"}
+    store.messages[session.session_id] = copy.deepcopy(session.context_messages)
+    replacement = session.context_messages[:2]
+
+    result = replace_webui_active_transcript(session, replacement)
+
+    assert result == {"active_count": 2}
+    assert store.messages[session.session_id] == replacement
+    assert store.replace_active_only[-1] is True
+    assert not session.path.exists(), "DB bridge must not publish the sidecar"
+
+
+def test_clean_rewind_uses_target_message_boundary(bridge_env):
+    store, _ = bridge_env
+    from api.session_db_bridge import rewind_webui_active_transcript
+
+    before = _messages("turn", 4)
+    for idx, message in enumerate(before, start=10):
+        message["id"] = idx
+    session = _session("rewind-clean", before, before)
+    store.sessions[session.session_id] = {"id": session.session_id, "source": "webui"}
+    store.messages[session.session_id] = copy.deepcopy(before)
+
+    result = rewind_webui_active_transcript(session, before, before[:2])
+
+    assert result == {"mode": "targeted", "rewound_count": 2}
+    assert store.messages[session.session_id] == before[:2]
+    assert store.rewind_count[session.session_id] == 1
+    assert store.reconcile_calls == []
+
+
+def test_diverged_rewind_reconciles_exact_active_transcript(bridge_env):
+    store, _ = bridge_env
+    from api.session_db_bridge import rewind_webui_active_transcript
+
+    before = _messages("sidecar", 4)
+    session = _session("rewind-diverged", before, before)
+    store.sessions[session.session_id] = {"id": session.session_id, "source": "webui"}
+    store.messages[session.session_id] = _messages("ghost", 7)
+
+    result = rewind_webui_active_transcript(session, before, before[:2])
+
+    assert result == {"mode": "reconciled", "rewound_count": 7}
+    assert store.messages[session.session_id] == before[:2]
+    assert store.reconcile_calls == [(session.session_id, before[:2])]
+    assert store.rewind_count[session.session_id] == 1
 
 
 def test_database_seed_failure_rolls_back_child_without_touching_existing_parent(bridge_env):
