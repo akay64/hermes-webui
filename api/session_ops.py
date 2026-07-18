@@ -1,6 +1,6 @@
 """Session-mutation operations for slash commands (/retry, /undo) and
-read-only aggregators (/status, /usage). Operates on the webui's own
-JSON Session store (api/models.py), not on hermes-agent's SQLite.
+read-only aggregators (/status, /usage). Durable transcript mutations commit
+through Hermes Agent's state.db before publishing the WebUI JSON projection.
 
 Behavior parity reference: gateway/run.py:_handle_*_command in
 the hermes-agent repo.
@@ -76,16 +76,19 @@ def mark_session_title_generated(session) -> None:
     session.manual_title = False
 
 
-def _truncate_at_last_user(messages):
-    history = messages or []
-    last_user_idx = None
-    for i in range(len(history) - 1, -1, -1):
-        if isinstance(history[i], dict) and history[i].get('role') == 'user':
-            last_user_idx = i
-            break
-    if last_user_idx is None:
-        return None
-    return history[:last_user_idx]
+def _nth_last_user_index(messages, n: int = 1) -> tuple[int | None, int]:
+    """Return the Nth-from-last user index and the number of turns found."""
+    wanted = max(1, int(n or 1))
+    user_indices = []
+    for i in range(len(messages or []) - 1, -1, -1):
+        row = messages[i]
+        if isinstance(row, dict) and row.get('role') == 'user':
+            user_indices.append(i)
+            if len(user_indices) >= wanted:
+                break
+    if not user_indices:
+        return None, 0
+    return user_indices[-1], len(user_indices)
 
 
 def _truncation_watermark_for(messages):
@@ -292,31 +295,41 @@ def retry_last(session_id: str) -> dict[str, Any]:
         s = get_session(session_id)  # raises KeyError if missing
         with LOCK:
             s = SESSIONS.get(session_id, s)
-            history = s.messages or []
-            last_user_idx = None
-            for i in range(len(history) - 1, -1, -1):
-                if history[i].get('role') == 'user':
-                    last_user_idx = i
-                    break
+            history = list(s.messages or [])
+            last_user_idx, _ = _nth_last_user_index(history)
             if last_user_idx is None:
                 raise ValueError('No previous message to retry.')
 
             last_user_text = _extract_text(history[last_user_idx].get('content', ''))
             removed_count = len(history) - last_user_idx
-            s.messages = history[:last_user_idx]
-            s.truncation_watermark = _truncation_watermark_for(s.messages)
+            planned_messages = history[:last_user_idx]
+            original_context = list(getattr(s, 'context_messages', None) or [])
+            planned_context = truncate_context_for_display_keep(
+                original_context,
+                history,
+                last_user_idx,
+            ) if original_context else []
+
+        from api.session_db_bridge import replace_webui_active_transcript
+
+        replace_webui_active_transcript(
+            s,
+            planned_context if original_context else planned_messages,
+        )
+        with LOCK:
+            s = SESSIONS.get(session_id, s)
+            s.messages = planned_messages
+            s.truncation_watermark = _truncation_watermark_for(planned_messages)
             # Persist the original truncate cutoff so empty-sidecar recovery
             # can distinguish legitimate prefix from deleted suffix.
             s.truncation_boundary = s.truncation_watermark
-            if isinstance(getattr(s, 'context_messages', None), list) and s.context_messages:
-                truncated_context = _truncate_at_last_user(s.context_messages)
-                if truncated_context is not None:
-                    s.context_messages = truncated_context
+            if original_context:
+                s.context_messages = planned_context
         s.save()
     return {'last_user_text': last_user_text, 'removed_count': removed_count}
 
 
-def undo_last(session_id: str) -> dict[str, Any]:
+def undo_last(session_id: str, n: int = 1) -> dict[str, Any]:
     """Remove the most recent user message and everything after it.
 
     Mirrors gateway/run.py:_handle_undo_command. Returns a preview of the
@@ -335,30 +348,44 @@ def undo_last(session_id: str) -> dict[str, Any]:
         with LOCK:
             # Stale-object guard — see retry_last for the rationale.
             s = SESSIONS.get(session_id, s)
-            history = s.messages or []
-            last_user_idx = None
-            for i in range(len(history) - 1, -1, -1):
-                if history[i].get('role') == 'user':
-                    last_user_idx = i
-                    break
+            history = list(s.messages or [])
+            last_user_idx, turns_undone = _nth_last_user_index(history, n)
             if last_user_idx is None:
                 raise ValueError('Nothing to undo.')
 
             removed_text = _extract_text(history[last_user_idx].get('content', ''))
             removed_count = len(history) - last_user_idx
-            s.messages = history[:last_user_idx]
-            s.truncation_watermark = _truncation_watermark_for(s.messages)
+            planned_messages = history[:last_user_idx]
+            original_context = list(getattr(s, 'context_messages', None) or [])
+            planned_context = truncate_context_for_display_keep(
+                original_context,
+                history,
+                last_user_idx,
+            ) if original_context else []
+
+        from api.session_db_bridge import rewind_webui_active_transcript
+
+        db_result = rewind_webui_active_transcript(
+            s,
+            original_context if original_context else history,
+            planned_context if original_context else planned_messages,
+        )
+        with LOCK:
+            s = SESSIONS.get(session_id, s)
+            s.messages = planned_messages
+            s.truncation_watermark = _truncation_watermark_for(planned_messages)
             # Persist the original truncate cutoff.
             s.truncation_boundary = s.truncation_watermark
-            if isinstance(getattr(s, 'context_messages', None), list) and s.context_messages:
-                truncated_context = _truncate_at_last_user(s.context_messages)
-                if truncated_context is not None:
-                    s.context_messages = truncated_context
+            if original_context:
+                s.context_messages = planned_context
         s.save()  # outside LOCK -- save() re-acquires LOCK via _write_session_index()
     preview = (removed_text[:40] + '...') if len(removed_text) > 40 else removed_text
     return {
         'removed_count': removed_count,
         'removed_preview': preview,
+        'removed_text': removed_text,
+        'turns_undone': turns_undone,
+        'db_mode': db_result.get('mode'),
     }
 
 

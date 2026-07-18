@@ -17744,41 +17744,7 @@ async function submitEdit(msgIdx, newText) {
 
 async function regenerateResponse(btn) {
   if(!S.session || S.busy) return;
-  const row = btn.closest('[data-msg-idx]');
-  if(!row) return;
-  const assistantIdx = parseInt(row.dataset.msgIdx, 10);
-  const loadedWindowOffset = Math.max(0, Number(_oldestIdx)||0);
-  const loadedWindowTruncated = !!(
-    typeof _messagesTruncated !== 'undefined' &&
-    _messagesTruncated &&
-    loadedWindowOffset > 0
-  );
-  const absoluteKeepCount = _oldestIdx + assistantIdx;
-  const initialSid = S.session.session_id;
-  let lastUserText = '';
-  for(let i = assistantIdx - 1; i >= 0; i--) {
-    const m = S.messages[i];
-    if(m && m.role === 'user') { lastUserText = msgContent(m); break; }
-  }
-  if(!lastUserText) return;
-  if(!loadedWindowTruncated&&typeof _ensureAllMessagesLoaded==='function'){
-    await _ensureAllMessagesLoaded();
-  }
-  if(!S.session || S.session.session_id !== initialSid) return;
-  try {
-    await api('/api/session/truncate', {method:'POST', body:JSON.stringify({
-      session_id: initialSid,
-      keep_count: absoluteKeepCount
-    })});
-    if(!S.session || S.session.session_id !== initialSid) return;
-    S.messages = S.messages.slice(
-      0,
-      _loadedMessageSliceEndForKeepCount(absoluteKeepCount, loadedWindowOffset, loadedWindowTruncated)
-    );
-    renderMessages();
-    $('msg').value = lastUserText;
-    await send();
-  } catch(e) { setStatus(t('regen_failed') + e.message); }
+  await cmdRetry();
 }
 
 // postProcessRenderedMessages() runs one frame AFTER the render + JS scroll

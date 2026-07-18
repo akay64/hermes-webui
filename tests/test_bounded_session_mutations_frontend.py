@@ -19,6 +19,10 @@ def test_undo_and_retry_use_bounded_session_reload():
     assert "await loadSession(activeSid,{force:true,keepStaleUntilLoaded:true,externalRefreshReason:'retry'});" in retry
     assert "await loadSession(activeSid,{force:true,keepStaleUntilLoaded:true,externalRefreshReason:'undo'});" in undo
     assert "await send();" in retry
+    assert "const args=arguments[0];" in undo
+    assert "JSON.stringify({session_id:activeSid,turns})" in undo
+    assert "$('msg').value=r.removed_text||''" in undo
+    assert "await send();" not in undo
 
     for block in (retry, undo):
         assert "api('/api/session?session_id='+encodeURIComponent(activeSid))" not in block

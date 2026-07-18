@@ -13,6 +13,7 @@ layer rather than being silently written to a local state.db.
 
 from __future__ import annotations
 
+import json
 import logging
 import sys
 from pathlib import Path
@@ -143,6 +144,150 @@ def _delete_session_quietly(db, session_id: str) -> None:
         db.delete_session(session_id)
     except Exception:
         logger.exception("Failed to roll back WebUI state.db session %s", session_id)
+
+
+def _message_identity(message: Any) -> tuple[str, ...]:
+    """Return a storage-agnostic identity for active transcript alignment."""
+    if not isinstance(message, dict):
+        return ("", repr(message))
+
+    def _stable(value: Any) -> str:
+        try:
+            return json.dumps(value, sort_keys=True, ensure_ascii=False, default=str)
+        except (TypeError, ValueError):
+            return repr(value)
+
+    return (
+        str(message.get("role") or ""),
+        _stable(message.get("content")),
+        str(message.get("tool_call_id") or message.get("tool_use_id") or ""),
+        str(message.get("tool_name") or message.get("name") or ""),
+        _stable(message.get("tool_calls") or []),
+    )
+
+
+def _messages_align(left: Iterable[dict], right: Iterable[dict]) -> bool:
+    return [_message_identity(message) for message in left] == [
+        _message_identity(message) for message in right
+    ]
+
+
+def _ensure_existing_session(db, session: Any, seed_messages: list) -> bool:
+    """Ensure *session* has a DB row; return whether this call created it."""
+    session_id = str(getattr(session, "session_id", "") or "")
+    if not session_id:
+        raise WebUISessionDBBridgeError("Session has no durable session ID.")
+    if db.get_session(session_id):
+        return False
+    db.create_session(session_id, **_session_metadata(session))
+    try:
+        if seed_messages:
+            db.replace_messages(session_id, seed_messages)
+    except Exception:
+        _delete_session_quietly(db, session_id)
+        raise
+    return True
+
+
+def replace_webui_active_transcript(
+    session: Any, active_messages: Iterable[dict] | None
+) -> dict[str, int]:
+    """Replace only a WebUI session's live Agent transcript.
+
+    Retry, regenerate, and edit-resubmit are replacement operations rather
+    than audit rewinds.  Inactive compaction/rewind rows remain untouched.
+    """
+    session_id = str(getattr(session, "session_id", "") or "")
+    replacement = [
+        dict(message) for message in (active_messages or []) if isinstance(message, dict)
+    ]
+    db = _open_session_db(getattr(session, "profile", None))
+    created = False
+    try:
+        created = _ensure_existing_session(db, session, [])
+        db.replace_messages(session_id, replacement, active_only=True)
+        return {"active_count": len(replacement)}
+    except Exception as exc:
+        if created:
+            _delete_session_quietly(db, session_id)
+        if isinstance(exc, WebUISessionDBBridgeError):
+            raise
+        raise WebUISessionDBBridgeError(
+            f"Could not replace the active session transcript: {exc}"
+        ) from exc
+    finally:
+        try:
+            db.close()
+        except Exception:
+            logger.debug("Failed to close active-transcript state.db handle", exc_info=True)
+
+
+def rewind_webui_active_transcript(
+    session: Any,
+    before_messages: Iterable[dict] | None,
+    after_messages: Iterable[dict] | None,
+) -> dict[str, Any]:
+    """Persist an Agent-compatible undo before WebUI publishes its sidecar.
+
+    A clean active transcript uses ``rewind_to_message`` so surviving prefix
+    rows retain identity.  Legacy JSON/DB divergence uses the Agent's atomic
+    reconciliation primitive to publish the exact intended active view while
+    retaining all previous rows as inactive audit history.
+    """
+    session_id = str(getattr(session, "session_id", "") or "")
+    before = [dict(message) for message in (before_messages or []) if isinstance(message, dict)]
+    after = [dict(message) for message in (after_messages or []) if isinstance(message, dict)]
+    if len(after) >= len(before):
+        raise WebUISessionDBBridgeError("Undo did not produce a shorter active transcript.")
+
+    db = _open_session_db(getattr(session, "profile", None))
+    created = False
+    try:
+        created = _ensure_existing_session(db, session, before)
+        active = _active_messages(db, session_id)
+        target = active[len(after)] if len(active) > len(after) else None
+        clean_boundary = (
+            _messages_align(active, before)
+            and isinstance(target, dict)
+            and target.get("role") == "user"
+            and target.get("id") is not None
+        )
+        if clean_boundary:
+            result = db.rewind_to_message(session_id, int(target["id"]))
+            return {
+                "mode": "targeted",
+                "rewound_count": int(result.get("rewound_count", 0)),
+            }
+
+        repair = getattr(db, "reconcile_active_transcript_for_rewind", None)
+        if not callable(repair):
+            raise WebUISessionDBBridgeError(
+                "Installed Hermes Agent cannot repair a diverged session transcript."
+            )
+        result = repair(session_id, after)
+        logger.warning(
+            "Repaired diverged active transcript for session %s: active %d→%d",
+            session_id,
+            len(active),
+            len(after),
+        )
+        return {
+            "mode": "reconciled",
+            "rewound_count": int(result.get("rewound_count", 0)),
+        }
+    except Exception as exc:
+        if created:
+            _delete_session_quietly(db, session_id)
+        if isinstance(exc, WebUISessionDBBridgeError):
+            raise
+        raise WebUISessionDBBridgeError(
+            f"Could not rewind the active session transcript: {exc}"
+        ) from exc
+    finally:
+        try:
+            db.close()
+        except Exception:
+            logger.debug("Failed to close rewind state.db handle", exc_info=True)
 
 
 def _remove_new_sidecar(child_session: Any) -> None:

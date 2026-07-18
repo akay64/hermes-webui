@@ -444,6 +444,37 @@ paths, plus branch/duplicate child-session tests covering active-context
 seeding, parent linkage, compressed sources, gateway refusal, and rollback on
 persistence failure.
 
+#### 4.4.3 Durable Undo, Retry, Regenerate, and Edit-Resubmit
+
+Transcript-shrinking mutations use the same profile-aware local `SessionDB`
+bridge and follow the compression consistency rule: `state.db` commits first;
+only then may WebUI publish the corresponding JSON/session-context projection.
+
+- `/undo [N]` is an audit rewind. On an aligned session it calls the Agent's
+  `rewind_to_message()`, which marks the selected user turn and its suffix
+  inactive and increments `rewind_count`. The removed prompt is returned to the
+  browser for composer prefill. If a legacy session's active DB transcript has
+  already diverged from the sidecar, the Agent atomically retires that active
+  view and inserts the exact intended prefix while preserving all inactive
+  compaction and rewind history.
+- `/retry` is an active-transcript replacement, not an audit rewind. It removes
+  the last user turn and its complete assistant/tool response from the active
+  DB view, preserves inactive history, publishes the matching sidecar/context
+  prefix, and resends the prompt once.
+- The Regenerate Response button delegates to `/retry`. It must not truncate at
+  the final assistant row, because doing so retains the original user prompt
+  (and potentially earlier tool/assistant rows) before appending a duplicate.
+- Edit-resubmit uses the same active-only replacement primitive through
+  `/api/session/truncate`; it is a rewind-to-prefix plus a new send, not an
+  in-place edit of an existing durable message row.
+
+If the database mutation fails, the in-memory session and JSON sidecar remain
+unchanged and no resend starts. Gateway-backed WebUI mutation is refused until
+the remote Agent exposes an equivalent durable control surface. As with
+compression, SQLite and the sidecar filesystem are not one atomic transaction;
+a sidecar write failure after a successful DB commit leaves `state.db` as the
+authoritative active transcript and requires projection recovery.
+
 ### 4.5 Approval System Integration
 
 The approval system uses the existing Hermes gateway module at tools/approval.py.

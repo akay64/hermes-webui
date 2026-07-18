@@ -1631,6 +1631,7 @@ EXPECT:
   - All messages after the edited message are removed
   - The edited text is sent as a new user message
   - Hermes streams a fresh response
+  - `state.db` active rows contain the edited prompt once and do not contain the original prompt/response suffix
 FAIL: Old messages remain, double messages, crash.
 
 ---
@@ -1649,10 +1650,11 @@ FAIL: Icon on every message, or not on last.
 STEPS:
   1. Hover the last assistant bubble and click the retry icon
 EXPECT:
-  - The last assistant message is removed
-  - The previous user message is re-sent
+  - The triggering user message and its entire assistant/tool response are removed before retry
+  - The previous user message is re-sent exactly once
   - Hermes streams a new response
-FAIL: Both messages removed, wrong message sent, crash.
+  - Slash `/retry` and the button produce the same active JSON/context/state.db transcript
+FAIL: Duplicate user message, retained old tool/assistant rows, wrong message sent, crash.
 
 ---
 
@@ -1926,7 +1928,7 @@ same `HERMES_HOME` (when applicable) and verify identical effect.
 - [ ] `/usage` — assistant message shows token counts; the "show token usage" setting is unchanged (toggle still in Settings panel).
 - [ ] `/stop` — interrupts a running stream; with no active stream toasts "No active task to stop."
 - [ ] `/retry` — removes last user+assistant exchange, refills composer with last user text, resends. Final transcript has only ONE copy of the resent message.
-- [ ] `/undo` — removes last user+assistant exchange; toast confirms; repeated until empty toasts "Nothing to undo."
+- [ ] `/undo [N]` — soft-rewinds N user turns in `state.db`, removes the same JSON/context suffix, prefills the oldest removed prompt, and increments `rewind_count` once.
 - [ ] `/model <name>` — switches model dropdown.
 - [ ] `/personality` — lists personalities; `/personality <name>` switches.
 - [ ] `/skills [query]` — lists matching skills.

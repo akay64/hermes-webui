@@ -59,6 +59,7 @@ from api.shares import create_or_refresh_share, load_share, revoke_share
 from api.session_db_bridge import (
     WebUISessionDBBridgeError,
     persist_webui_child_session,
+    replace_webui_active_transcript,
 )
 
 logger = logging.getLogger(__name__)
@@ -14807,6 +14808,8 @@ def handle_post(handler, parsed) -> bool:
             return bad(handler, str(e))
         if _session_is_subagent_view_only(body["session_id"]):
             return bad(handler, "Subagent sessions are view-only and cannot be modified from WebUI", 400)
+        if webui_gateway_chat_enabled(load_settings()):
+            return bad(handler, "Durable transcript replacement is not available in gateway mode.", 501)
         if body.get("keep_count") is None:
             return bad(handler, "Missing required field(s): keep_count")
         try:
@@ -14827,8 +14830,32 @@ def handle_post(handler, parsed) -> bool:
         if keep < 0:
             return bad(handler, "keep_count must be non-negative")
         with _get_session_agent_lock(body["session_id"]):
-            from api.session_ops import truncate_session_at_keep
+            from api.session_ops import (
+                truncate_context_for_display_keep,
+                truncate_session_at_keep,
+            )
 
+            # Re-read under the per-session lock so the DB projection and the
+            # sidecar plan come from the same canonical in-memory object.
+            try:
+                s = get_session(body["session_id"])
+            except KeyError:
+                return bad(handler, "Session not found", 404)
+            full_messages = list(s.messages or [])
+            original_context = list(getattr(s, "context_messages", None) or [])
+            planned_messages = full_messages[:keep]
+            planned_context = (
+                truncate_context_for_display_keep(original_context, full_messages, keep)
+                if original_context
+                else []
+            )
+            try:
+                replace_webui_active_transcript(
+                    s,
+                    planned_context if original_context else planned_messages,
+                )
+            except WebUISessionDBBridgeError as exc:
+                return bad(handler, str(exc), 503)
             old_msg_count, old_ctx_count = truncate_session_at_keep(s, keep)
             s.save()
             logger.info(
@@ -15007,6 +15034,8 @@ def handle_post(handler, parsed) -> bool:
             return bad(handler, str(e))
         if _session_is_subagent_view_only(body["session_id"]):
             return bad(handler, "Subagent sessions are view-only and cannot be modified from WebUI", 400)
+        if webui_gateway_chat_enabled(load_settings()):
+            return bad(handler, "Durable retry is not available in gateway mode.", 501)
         try:
             from api.session_ops import retry_last
             result = retry_last(body["session_id"])
@@ -15015,6 +15044,8 @@ def handle_post(handler, parsed) -> bool:
             return bad(handler, "Session not found", 404)
         except ValueError as e:
             return j(handler, {"error": str(e)})
+        except WebUISessionDBBridgeError as exc:
+            return bad(handler, str(exc), 503)
 
     if parsed.path == "/api/session/undo":
         try:
@@ -15023,14 +15054,22 @@ def handle_post(handler, parsed) -> bool:
             return bad(handler, str(e))
         if _session_is_subagent_view_only(body["session_id"]):
             return bad(handler, "Subagent sessions are view-only and cannot be modified from WebUI", 400)
+        if webui_gateway_chat_enabled(load_settings()):
+            return bad(handler, "Durable undo is not available in gateway mode.", 501)
+        try:
+            turns = max(1, int(body.get("turns", 1)))
+        except (TypeError, ValueError):
+            return bad(handler, "turns must be an integer")
         try:
             from api.session_ops import undo_last
-            result = undo_last(body["session_id"])
+            result = undo_last(body["session_id"], turns)
             return j(handler, {"ok": True, **result})
         except KeyError:
             return bad(handler, "Session not found", 404)
         except ValueError as e:
             return j(handler, {"error": str(e)})
+        except WebUISessionDBBridgeError as exc:
+            return bad(handler, str(exc), 503)
 
     # ── YOLO mode toggle (POST) ──
     # Session-scoped only — stored in-memory on the server side.
