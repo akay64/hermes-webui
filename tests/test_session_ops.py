@@ -6,6 +6,7 @@ We seed transcripts via POST /api/session/import (ignores incoming
 session_id; returns a fresh one we register for cleanup).
 """
 import json
+import sqlite3
 import urllib.request
 import urllib.error
 
@@ -43,6 +44,28 @@ def _import_session_with_messages(cleanup_list, messages, model='openai/gpt-5.4-
     return sid
 
 
+def _db_messages(sid, *, active):
+    with sqlite3.connect(TEST_STATE_DIR / "state.db") as conn:
+        conn.row_factory = sqlite3.Row
+        return [
+            dict(row)
+            for row in conn.execute(
+                "SELECT role, content, active FROM messages "
+                "WHERE session_id = ? AND active = ? ORDER BY id",
+                (sid, 1 if active else 0),
+            ).fetchall()
+        ]
+
+
+def _db_session(sid):
+    with sqlite3.connect(TEST_STATE_DIR / "state.db") as conn:
+        conn.row_factory = sqlite3.Row
+        row = conn.execute(
+            "SELECT message_count, rewind_count FROM sessions WHERE id = ?", (sid,)
+        ).fetchone()
+        return dict(row) if row else None
+
+
 # -- /api/session/retry ----------------------------------------------------
 
 def test_retry_returns_last_user_text(cleanup_test_sessions):
@@ -71,6 +94,10 @@ def test_retry_truncates_transcript(cleanup_test_sessions):
     # After retry: only the first exchange remains (2 messages).
     assert len(sess['messages']) == 2
     assert sess['messages'][-1]['content'] == 'first reply'
+    assert [(m['role'], m['content']) for m in _db_messages(sid, active=True)] == [
+        ('user', 'first user msg'),
+        ('assistant', 'first reply'),
+    ]
 
 
 def test_retry_no_user_returns_error(cleanup_test_sessions):
@@ -114,6 +141,35 @@ def test_retry_does_not_double_append(cleanup_test_sessions):
     assert len(msgs) == 2
     assert msgs[0]['content'] == 'msg A'
     assert msgs[1]['content'] == 'reply A'
+
+
+def test_retry_removes_entire_multistep_response_from_json_and_db(cleanup_test_sessions):
+    sid = _import_session_with_messages(cleanup_test_sessions, [
+        {'role': 'user', 'content': 'q1'},
+        {'role': 'assistant', 'content': 'a1'},
+        {'role': 'user', 'content': 'run tools'},
+        {
+            'role': 'assistant',
+            'content': '',
+            'tool_calls': [{'id': 'call-1', 'function': {'name': 'demo', 'arguments': '{}'}}],
+        },
+        {'role': 'tool', 'content': 'tool output', 'tool_call_id': 'call-1'},
+        {'role': 'assistant', 'content': 'old final answer'},
+    ])
+
+    result = _post(TEST_BASE, '/api/session/retry', {'session_id': sid})
+
+    assert result['ok'] is True
+    assert result['last_user_text'] == 'run tools'
+    session = _get(f'/api/session?session_id={sid}')['session']
+    assert [(m['role'], m.get('content', '')) for m in session['messages']] == [
+        ('user', 'q1'),
+        ('assistant', 'a1'),
+    ]
+    assert [(m['role'], m['content']) for m in _db_messages(sid, active=True)] == [
+        ('user', 'q1'),
+        ('assistant', 'a1'),
+    ]
 
 
 def test_retry_concurrent_requests_are_safe(cleanup_test_sessions):
@@ -160,6 +216,32 @@ def test_retry_concurrent_requests_are_safe(cleanup_test_sessions):
     )
 
 
+def test_edit_truncate_replaces_active_state_db_prefix(cleanup_test_sessions):
+    sid = _import_session_with_messages(cleanup_test_sessions, [
+        {'role': 'user', 'content': 'q1'},
+        {'role': 'assistant', 'content': 'a1'},
+        {'role': 'user', 'content': 'original edit target'},
+        {'role': 'assistant', 'content': 'old dependent answer'},
+    ])
+
+    result = _post(
+        TEST_BASE,
+        '/api/session/truncate',
+        {'session_id': sid, 'keep_count': 2},
+    )
+
+    assert result['ok'] is True
+    assert [(m['role'], m['content']) for m in result['session']['messages']] == [
+        ('user', 'q1'),
+        ('assistant', 'a1'),
+    ]
+    assert [(m['role'], m['content']) for m in _db_messages(sid, active=True)] == [
+        ('user', 'q1'),
+        ('assistant', 'a1'),
+    ]
+    assert _db_messages(sid, active=False) == []
+
+
 # ── /api/session/undo ─────────────────────────────────────────────────────
 
 def test_undo_returns_removed_preview(cleanup_test_sessions):
@@ -187,6 +269,43 @@ def test_undo_truncates_transcript(cleanup_test_sessions):
     sess = _get(f'/api/session?session_id={sid}')['session']
     assert len(sess['messages']) == 2
     assert sess['messages'][-1]['content'] == 'first reply'
+    assert [(m['role'], m['content']) for m in _db_messages(sid, active=True)] == [
+        ('user', 'first user msg'),
+        ('assistant', 'first reply'),
+    ]
+    assert [(m['role'], m['content']) for m in _db_messages(sid, active=False)] == [
+        ('user', 'second user msg'),
+        ('assistant', 'second reply'),
+    ]
+    assert _db_session(sid) == {'message_count': 4, 'rewind_count': 1}
+
+
+def test_undo_multiple_turns_matches_agent_semantics(cleanup_test_sessions):
+    sid = _import_session_with_messages(cleanup_test_sessions, [
+        {'role': 'user', 'content': 'q1'},
+        {'role': 'assistant', 'content': 'a1'},
+        {'role': 'user', 'content': 'q2'},
+        {'role': 'assistant', 'content': 'a2'},
+        {'role': 'user', 'content': 'q3'},
+        {'role': 'assistant', 'content': 'a3'},
+    ])
+
+    result = _post(TEST_BASE, '/api/session/undo', {'session_id': sid, 'turns': 2})
+
+    assert result['ok'] is True
+    assert result['turns_undone'] == 2
+    assert result['removed_text'] == 'q2'
+    session = _get(f'/api/session?session_id={sid}')['session']
+    assert [(m['role'], m['content']) for m in session['messages']] == [
+        ('user', 'q1'),
+        ('assistant', 'a1'),
+    ]
+    assert [(m['role'], m['content']) for m in _db_messages(sid, active=False)] == [
+        ('user', 'q2'),
+        ('assistant', 'a2'),
+        ('user', 'q3'),
+        ('assistant', 'a3'),
+    ]
 
 
 def test_undo_repeated_until_empty(cleanup_test_sessions):

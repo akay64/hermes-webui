@@ -32,10 +32,28 @@ def test_submit_edit_uses_absolute_keep_count():
     assert "keep_count: absoluteKeepCount" in body
 
 
-def test_regenerate_uses_absolute_keep_count():
+def test_regenerate_delegates_to_retry_instead_of_assistant_truncate():
     body = _function_body(UI_JS, "regenerateResponse")
-    assert re.search(r"absoluteKeepCount\s*=\s*_oldestIdx\s*\+\s*assistantIdx", body)
-    assert "keep_count: absoluteKeepCount" in body
+    assert "await cmdRetry()" in body
+    assert "/api/session/truncate" not in body
+    assert "await send()" not in body
+    assert "assistantIdx" not in body
+
+
+def test_regenerate_invokes_shared_retry_exactly_once():
+    body = _function_body(UI_JS, "regenerateResponse")
+    script = f"""
+const assert = require('assert');
+const S = {{session: {{session_id: 's1'}}, busy: false}};
+let retryCalls = 0;
+async function cmdRetry() {{ retryCalls += 1; }}
+{body}
+(async () => {{
+  await regenerateResponse({{}});
+  assert.strictEqual(retryCalls, 1);
+}})().catch(error => {{ console.error(error); process.exit(1); }});
+"""
+    subprocess.run(["node", "-e", script], check=True, capture_output=True, text=True)
 
 
 def test_submit_edit_captures_absolute_before_await():
@@ -48,10 +66,13 @@ def test_submit_edit_captures_absolute_before_await():
 
 def test_truncated_edit_and_regenerate_do_not_force_full_reload():
     """A visible paginated target can be truncated without loading all history."""
-    for name in ("submitEdit", "regenerateResponse"):
-        body = "".join(_function_body(UI_JS, name).split())
-        assert "if(!loadedWindowTruncated&&typeof_ensureAllMessagesLoaded==='function')" in body
-        assert "_loadedMessageSliceEndForKeepCount(absoluteKeepCount,loadedWindowOffset,loadedWindowTruncated)" in body
+    body = "".join(_function_body(UI_JS, "submitEdit").split())
+    assert "if(!loadedWindowTruncated&&typeof_ensureAllMessagesLoaded==='function')" in body
+    assert "_loadedMessageSliceEndForKeepCount(absoluteKeepCount,loadedWindowOffset,loadedWindowTruncated)" in body
+
+    regenerate = "".join(_function_body(UI_JS, "regenerateResponse").split())
+    assert "awaitcmdRetry();" in regenerate
+    assert "_ensureAllMessagesLoaded" not in regenerate
 
 
 def test_loaded_window_slice_end_preserves_absolute_keep_count_semantics():
