@@ -22,17 +22,18 @@ def _function_body(src: str, signature: str) -> str:
     raise AssertionError(f"function body not found: {signature}")
 
 
-def test_toolsets_dropdown_fetches_configured_mcp_server_names():
+def test_toolsets_dropdown_fetches_complete_profile_catalog_and_presets():
     load = _function_body(UI_JS, "function _loadToolsetsCatalog")
     normalize = _function_body(UI_JS, "function _normalizeToolsetsCatalog")
     toggle = _function_body(UI_JS, "function toggleToolsetsDropdown")
 
-    assert "api('/api/mcp/servers')" in load
-    assert "payload.servers" in normalize
-    assert "server.name" in normalize
+    assert "api('/api/toolsets/catalog')" in load
+    assert "payload.toolsets" in normalize
+    assert "_loadToolsetsPresets(true)" in toggle
+    assert "entry.name" in normalize
     assert "_toolsetsCatalog = false;" in load
     assert "return [];" in load
-    assert "_loadToolsetsCatalog().then(function()" in toggle
+    assert "_loadToolsetsPresets(true).then(function()" in toggle
 
 
 def test_async_catalog_refresh_preserves_manual_toolset_input():
@@ -62,7 +63,7 @@ def test_profile_default_action_saves_null_override():
     assert "toolsetsProfileDefaultsBtn" in UI_JS
     assert "session_toolsets_use_profile_defaults" in UI_JS
     assert "if (e.target.closest('#toolsetsProfileDefaultsBtn'))" in click_block
-    assert "_applySessionToolsets(null);" in click_block
+    assert "_requestSessionToolsets(null" in click_block
     assert "static/index.html" not in UI_JS
     assert "toolsetsProfileDefaultsBtn" not in INDEX_HTML
 
@@ -78,7 +79,7 @@ def test_custom_checkbox_and_manual_selection_reuse_existing_apply_path():
     assert "checkbox.value = name" in render_sections
     assert "input.value = checked.concat(manual).join(', ')" in change_block
     assert "const toolsets = raw.split(',').map(s => s.trim()).filter(Boolean);" in apply_block
-    assert "_applySessionToolsets(toolsets);" in apply_block
+    assert "_requestSessionToolsets(toolsets" in apply_block
 
 
 def test_toolsets_affordance_i18n_keys_exist_in_locale_blocks():
@@ -109,7 +110,8 @@ def test_mcp_server_panel_refreshes_cached_toolsets_catalog():
     load_servers = _function_body(PANELS_JS, "function loadMcpServers")
     toggle_server = _function_body(PANELS_JS, "function toggleMcpServer")
 
-    assert "_toolsetsCatalog = payload && Array.isArray(payload.servers)" in invalidate
+    assert "_toolsetsCatalog = payload ? _normalizeToolsetsCatalog(payload) : null" in invalidate
+    assert "_toolsetsPresetsPayload = null" in invalidate
     assert "_normalizeToolsetsCatalog(payload)" in invalidate
     assert ": null" in invalidate
     assert "window.invalidateToolsetsCatalog = invalidateToolsetsCatalog" in UI_JS
