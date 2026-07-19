@@ -4972,13 +4972,11 @@ function _applyToolsetsChip(toolsets) {
   const label = $('composerToolsetsLabel');
   const chip = $('composerToolsetsChip');
   if (!wrap || !label) return;
-  // Visibility is controlled entirely by responsive CSS — the chip shows only
-  // at wide composer-footer widths (>= 1100px container query). At narrower
-  // widths the layout is too cramped (model + reasoning + profile + workspace
-  // + context-ring + send) to add another chip. Cleared inline style so the
-  // CSS @container query is the single source of truth. State is still
-  // tracked so /api/session/toolsets continues to work for cron/scripted
-  // callers regardless of UI visibility. (#1431)
+  // Visibility is controlled entirely by responsive CSS. The chip is eligible
+  // throughout the normal desktop composer range (including accessibility
+  // zoom); the fit engine hides it via .cf-burger only on actual overflow.
+  // Cleared inline style so CSS remains the single source of truth. State is
+  // still tracked for scripted callers regardless of visibility. (#1431)
   wrap.style.display = '';
   const hasCustom = Array.isArray(toolsets) && toolsets.length > 0;
   const isStaged = hasCustom
@@ -5294,8 +5292,8 @@ function _positionToolsetsDropdown() {
   const mobileAction = $('composerMobileToolsetsAction');
   const footer = document.querySelector('.composer-footer');
   if (!dd || !chip || !footer) return;
-  // Defense: if the chip has been hidden by responsive CSS (e.g. resize across
-  // 1100px container threshold while dropdown was open), don't try to anchor
+  // Defense: if the chip has been hidden by responsive CSS (e.g. resize into
+  // the compact/burger layout while the dropdown was open), don't try to anchor
   // to a zero-rect element — close the dropdown instead. (#1431)
   const panel = $('composerMobileConfigPanel');
   const anchor = (panel && panel.classList.contains('open') && mobileAction)
@@ -5558,7 +5556,7 @@ document.addEventListener('change', function(e) {
 });
 
 // Position toolsets dropdown on resize, OR close it if the chip is no longer
-// visible (e.g. resize crossed the 1100px container threshold while dropdown
+// visible (e.g. resize entered the compact/burger layout while the dropdown
 // was open — the wrap is hidden by CSS but the dropdown sibling stays open
 // without an anchor). (#1431)
 window.addEventListener('resize', () => {

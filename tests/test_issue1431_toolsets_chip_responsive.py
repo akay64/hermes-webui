@@ -2,7 +2,8 @@
 
 The chip must:
   * Be hidden by default (CSS base rule).
-  * Be shown only at wide composer-footer widths (>= 1100px container query).
+  * Be eligible throughout the desktop composer range (>= 780px), including
+    accessibility zoom, while the fit engine handles real overflow.
   * Stay hidden on mobile (@media max-width:640px and the .cf-burger stage).
   * Have its visibility controlled by CSS, NOT by JS (single source of truth).
   * Continue to track state through _applyToolsetsChip() so /api/session/toolsets
@@ -33,17 +34,17 @@ class TestToolsetsChipResponsiveCSS:
             f"Base rule must default-hide the chip: got {rule!r}"
         )
 
-    def test_wide_container_query_shows_chip(self):
-        """An @container composer-footer (min-width: 1100px) rule must reveal the chip."""
+    def test_desktop_container_query_shows_chip_at_accessibility_zoom_width(self):
+        """The desktop composer minimum must reveal the chip; fit logic owns overflow."""
         css = _src("style.css")
         # Find the min-width container query — accept either display:block or display:flex
         # (we use block to match sibling wraps but either is a valid reveal)
         m = re.search(
-            r'@container\s+composer-footer\s*\(\s*min-width:\s*1100px\s*\)\s*\{[^}]*\.composer-toolsets-wrap\s*\{[^}]*display:\s*(block|flex)[^}]*\}',
+            r'@container\s+composer-footer\s*\(\s*min-width:\s*780px\s*\)\s*\{[^}]*\.composer-toolsets-wrap\s*\{[^}]*display:\s*(block|flex)[^}]*\}',
             css, re.DOTALL,
         )
         assert m, (
-            "Must have @container composer-footer (min-width: 1100px) rule "
+            "Must have @container composer-footer (min-width: 780px) rule "
             "that shows .composer-toolsets-wrap with display:block or display:flex"
         )
 
@@ -182,7 +183,7 @@ class TestToolsetsDropdownResizeGuard:
     """Opus-found defense: dropdown must close when chip becomes hidden by CSS.
 
     The dropdown is a DOM sibling of the wrap, not a child. CSS hiding the
-    wrap (e.g. by crossing the 1100px container threshold mid-session via the
+    wrap (e.g. by entering the compact/burger stage mid-session via the
     workspace-panel toggle) does NOT cascade-hide the open dropdown. Without
     a guard, the dropdown would either snap to the footer's left edge with no
     anchor, or stay open with no visible chip to dismiss it from.
@@ -202,7 +203,7 @@ class TestToolsetsDropdownResizeGuard:
         assert "offsetParent" in body, (
             "Resize handler must check chip.offsetParent === null — without it "
             "the open dropdown stays open after CSS hides the chip mid-session "
-            "(e.g. workspace-panel toggle crossing 1100px threshold)"
+            "(e.g. workspace-panel toggle entering the burger stage)"
         )
         assert "closeToolsetsDropdown" in body, (
             "Resize handler must call closeToolsetsDropdown() when chip is "

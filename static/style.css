@@ -3010,15 +3010,13 @@
   .composer-footer.cf-burger .composer-mobile-context-action{flex:1 0 100%;}
   .composer-footer.cf-burger .ctx-indicator-wrap{display:none!important;}
 
-  /* Show session-toolsets chip ONLY when the composer-footer container is wide
-     enough to comfortably accommodate it (workspace+model+reasoning+profile+
-     toolsets+context-ring+send all need room to breathe, see #1431). At
-     narrower container widths the chip is hidden by the base rule above —
-     the underlying state and /api/session/toolsets endpoint continue to work
-     for scripted callers regardless of UI visibility. Uses display:block to
-     match sibling wraps (.composer-profile-wrap, .composer-model-wrap, etc.)
-     rather than display:flex — the chip child has its own inline-flex layout. */
-  @container composer-footer (min-width: 1100px) {
+  /* Make the toolsets chip eligible across the composer's normal desktop
+     width range, including accessibility zoom. The fit engine above measures
+     real overflow, compacts labels, and applies .cf-burger (which hides this
+     chip) only when the controls genuinely cannot fit. The 780px gate matches
+     .composer-box's minimum desktop width; phone layouts still hide the chip
+     explicitly below. */
+  @container composer-footer (min-width: 780px) {
     .composer-toolsets-wrap{display:block;}
   }
 
