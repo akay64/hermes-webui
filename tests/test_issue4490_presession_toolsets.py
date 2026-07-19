@@ -92,9 +92,10 @@ def test_new_session_request_consumes_pending_toolsets_once():
     before_post = compact[:post_start]
     after_assignment = compact[compact.index("S.session=data.session") :]
 
-    assert "Array.isArray(S._pendingSessionToolsets)" in before_post
+    assert "S._pendingSessionToolsetsExplicit" in before_post
     assert "reqBody.enabled_toolsets=S._pendingSessionToolsets" in before_post
     assert "S._pendingSessionToolsets=null" in after_assignment
+    assert "S._pendingSessionToolsetsExplicit=false" in after_assignment
 
 
 def test_pending_toolsets_only_forwarded_from_empty_composer():
@@ -107,7 +108,16 @@ def test_pending_toolsets_only_forwarded_from_empty_composer():
     post_start = compact.index("api('/api/session/new'")
     before_post = compact[:post_start]
     # The forwarding line must be gated on the no-session (empty composer) state.
-    assert "!S.session&&Array.isArray(S._pendingSessionToolsets)" in before_post
+    assert "!S.session&&S._pendingSessionToolsetsExplicit" in before_post
+
+
+def test_pre_session_explicit_null_is_forwarded_to_bypass_saved_default():
+    compact = SESSIONS_JS.replace(" ", "")
+    post_start = compact.index("api('/api/session/new'")
+    before_post = compact[:post_start]
+
+    assert "reqBody.enabled_toolsets=S._pendingSessionToolsets" in before_post
+    assert "S._pendingSessionToolsetsExplicit" in before_post
 
 
 def test_load_existing_session_clears_staged_toolsets():
@@ -170,6 +180,34 @@ def test_api_session_new_accepts_enabled_toolsets():
     payload = handler.payload()
     assert handler.status == 200
     assert payload["session"]["enabled_toolsets"] == ["filesystem", "shell"]
+
+
+def test_api_session_new_omitted_toolsets_applies_saved_default():
+    with tempfile.TemporaryDirectory() as tmp, patch(
+        "api.routes.get_last_workspace", return_value=tmp
+    ), patch(
+        "api.routes._default_toolsets_for_new_chat", return_value=["terminal", "web"]
+    ) as resolve_default:
+        handler = _DummyHandler({})
+        handle_post(handler, urlparse("/api/session/new"))
+
+    assert handler.status == 200
+    assert handler.payload()["session"]["enabled_toolsets"] == ["terminal", "web"]
+    resolve_default.assert_called_once_with(profile=None)
+
+
+def test_api_session_new_explicit_null_bypasses_saved_default():
+    with tempfile.TemporaryDirectory() as tmp, patch(
+        "api.routes.get_last_workspace", return_value=tmp
+    ), patch(
+        "api.routes._default_toolsets_for_new_chat"
+    ) as resolve_default:
+        handler = _DummyHandler({"enabled_toolsets": None})
+        handle_post(handler, urlparse("/api/session/new"))
+
+    assert handler.status == 200
+    assert handler.payload()["session"]["enabled_toolsets"] is None
+    resolve_default.assert_not_called()
 
 
 def test_api_session_new_rejects_malformed_enabled_toolsets():
