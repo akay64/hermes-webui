@@ -5257,7 +5257,11 @@ function _renderToolsetsPresetSections(opts) {
     change.type = 'button';
     change.dataset.toolsetWarningAction = 'current';
     change.textContent = 'Change this conversation anyway';
-    actions.append(start, change);
+    const cancel = document.createElement('button');
+    cancel.type = 'button';
+    cancel.dataset.toolsetWarningAction = 'cancel';
+    cancel.textContent = 'Cancel';
+    actions.append(start, change, cancel);
     warning.appendChild(actions);
   }
   section.appendChild(warning);
@@ -5343,6 +5347,9 @@ function closeToolsetsDropdown() {
   const dd = $('composerToolsetsDropdown');
   const chip = $('composerToolsetsChip');
   const mobileAction = $('composerMobileToolsetsAction');
+  // A cache-risk warning represents only the proposed selection currently
+  // being reviewed. Closing the selector abandons that proposal.
+  _pendingToolsetChange = null;
   if (dd) dd.classList.remove('open');
   if (chip) chip.classList.remove('active');
   if (mobileAction) mobileAction.classList.remove('active');
@@ -5509,10 +5516,15 @@ document.addEventListener('click', function(e) {
   if (warningAction && _pendingToolsetChange) {
     const change = _pendingToolsetChange;
     _pendingToolsetChange = null;
-    if (warningAction.dataset.toolsetWarningAction === 'new') {
+    const action = warningAction.dataset.toolsetWarningAction;
+    if (action === 'cancel') {
+      const state = $('toolsetsDropdownState');
+      const input = $('toolsetsInput');
+      _renderToolsetsPresetSections({ state, input });
+    } else if (action === 'new') {
       closeToolsetsDropdown();
       newSession(true, { enabled_toolsets: change.toolsets });
-    } else {
+    } else if (action === 'current') {
       _applySessionToolsets(change.toolsets);
       closeToolsetsDropdown();
     }

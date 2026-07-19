@@ -17,10 +17,16 @@ def test_presets_use_profile_scoped_backend_api_not_browser_storage():
     assert "localStorage" not in UI[UI.index("// ── Session toolsets chip") : UI.index("function _syncMobileComposerConfigButton")]
 
 
-def test_mid_conversation_cache_warning_has_both_actions():
+def test_mid_conversation_cache_warning_has_three_actions_and_dismisses_cleanly():
     assert "Changing tools rebuilds this conversation’s agent and may reduce prompt-cache reuse." in UI
     assert "Start new chat with this preset" in UI
     assert "Change this conversation anyway" in UI
+    assert "cancel.dataset.toolsetWarningAction = 'cancel'" in UI
+    assert "cancel.textContent = 'Cancel'" in UI
+    assert "if (action === 'cancel')" in UI
+    close_start = UI.index("function closeToolsetsDropdown()")
+    close_end = UI.index("function _sessionHasToolsetCacheRisk()", close_start)
+    assert "_pendingToolsetChange = null" in UI[close_start:close_end]
     assert "newSession(true, { enabled_toolsets: change.toolsets })" in UI
 
 
