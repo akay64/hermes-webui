@@ -3436,7 +3436,10 @@ window._mirrorSpeechSettingsFromServer=_mirrorSpeechSettingsFromServer;
       if (p && typeof p === 'object' && typeof p.name === 'string') {
         _bootActiveProfileUnauthRedirectBudget.clearAttempted(markerStorage);
         if (p.default_workspace) S._profileDefaultWorkspace = p.default_workspace;
-        return {status: 'resolved', profile: p.name || 'default', isDefault: !!p.is_default};
+        return {
+          status: 'resolved', profile: p.name || 'default', isDefault: !!p.is_default,
+          toolsetPresets: p.toolset_presets || null,
+        };
       }
       if (p === undefined && !alreadyAttempted) {
         if (_bootActiveProfileUnauthRedirectBudget.spendOnRedirect(markerStorage)) {
@@ -3465,6 +3468,9 @@ window._mirrorSpeechSettingsFromServer=_mirrorSpeechSettingsFromServer;
   if (activeProfileState.status === 'recovery-redirect') return;
   S.activeProfile = activeProfileState.profile;
   S.activeProfileIsDefault = activeProfileState.isDefault;
+  if (typeof window !== 'undefined' && typeof window.hydrateToolsetPresets === 'function') {
+    window.hydrateToolsetPresets(activeProfileState.toolsetPresets);
+  }
   applyBotName();
   // Update profile chip label immediately
   const profileLabel=$('profileChipLabel');

@@ -226,6 +226,7 @@ If an AI assistant is helping with install, reinstall, bootstrap, provider setup
 - Download as Markdown transcript, full JSON export, or import from JSON
 - Create a public read-only share link for the active conversation from the Control Center; shared pages show a sanitized transcript snapshot without workspace, profile, or live controls
 - Sessions persist across page reloads and SSH tunnel reconnects
+- Profile-scoped Toolset Presets save exact built-in/MCP allowlists, with an optional cache-safe default for ordinary new chats; existing and specialized sessions are never changed ([guide](docs/toolset-presets.md))
 - Browser tab title reflects the active session name
 - CLI session bridge -- CLI sessions from hermes-agent's SQLite store appear in the sidebar with a gold "cli" badge; click to import with full history and reply normally
 - Token/cost display -- input tokens, output tokens, estimated cost shown per conversation (toggle in Settings or `/usage` command)
@@ -671,6 +672,7 @@ The WebUI is still coupled to Hermes Agent internals for runtime execution, prov
 - [`docs/why-hermes.md`](docs/why-hermes.md) — why Hermes, the mental model, and a detailed comparison to Claude Code / Codex / OpenCode / Cursor
 - [`docs/onboarding.md`](docs/onboarding.md) — first-run wizard, provider setup, local model server Base URLs, and safe re-runs
 - [`docs/troubleshooting.md`](docs/troubleshooting.md) — diagnostic flows for common failures (e.g. "AIAgent not available")
+- [`docs/toolset-presets.md`](docs/toolset-presets.md) — saved exact toolset allowlists, MCP behavior, defaults, cache warning, and profile-scoped JSON storage
 
 **Using & customizing**
 - [`THEMES.md`](THEMES.md) — theme + skin system, custom theme guide

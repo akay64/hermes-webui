@@ -823,8 +823,14 @@ Default toolset list (hardcoded fallback):
     browser, clarify, code_execution, cronjob, delegation, file,
     image_gen, memory, session_search, skills, terminal, todo, tts, vision, web
 
-The web UI always runs with the full CLI toolset. There is no per-session toolset
-restriction from the UI yet (see ROADMAP.md Wave 4 for the plan).
+The WebUI resolves the active profile's CLI toolsets by default. Ordinary new
+chats may instead copy an exact allowlist from a profile-scoped Toolset Preset,
+and sessions may retain an explicit per-session override. Presets live in
+`<HERMES_HOME>/webui/toolset_presets.json`; sessions own copied
+`enabled_toolsets` arrays and never link back to preset state. Omitted, explicit
+`null`, and explicit-list `/api/session/new` values are distinct. Specialized
+session constructors do not consult the saved default. See
+`docs/toolset-presets.md`.
 
 ### 8.1 Config YAML authorship and raw-value preservation
 

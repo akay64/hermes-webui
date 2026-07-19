@@ -5,7 +5,7 @@
 // legacy reverse-scan over S.messages — that keeps new clients working
 // against old servers (Phase 1 may not yet be deployed everywhere).
 // See api/todo_state.py for the wire contract.
-const S={session:null,messages:[],entries:[],busy:false,pendingFiles:[],toolCalls:[],activeStreamId:null,currentDir:'.',activeProfile:'default',activeProfileIsDefault:true,showHiddenWorkspaceFiles:false,todos:[],todoStateMeta:null,_pendingSessionToolsets:null};
+const S={session:null,messages:[],entries:[],busy:false,pendingFiles:[],toolCalls:[],activeStreamId:null,currentDir:'.',activeProfile:'default',activeProfileIsDefault:true,showHiddenWorkspaceFiles:false,todos:[],todoStateMeta:null,_pendingSessionToolsets:null,_pendingSessionToolsetsExplicit:false};
 
 function assistantDisplayName(){
   if(S.activeProfile&&S.activeProfile!=='default') return S.activeProfile.charAt(0).toUpperCase()+S.activeProfile.slice(1);
@@ -4946,6 +4946,25 @@ document.addEventListener('click',function(e){
 // ── Session toolsets chip (#493) ───────────────────────────────────────────
 let _currentSessionToolsets = null; // null = active profile defaults, array = custom list
 let _toolsetsCatalog = null;
+let _toolsetsPresetsPayload = null;
+let _toolsetsPresetsPromise = null;
+let _toolsetsPresetsHydratedPartial = false;
+let _pendingToolsetChange = null;
+
+function _toolsetPresetForList(toolsets) {
+  if (!_toolsetsPresetsPayload || !Array.isArray(toolsets)) return null;
+  const key = toolsets.join('\u0000');
+  return (_toolsetsPresetsPayload.presets || []).find(function(preset) {
+    return Array.isArray(preset.toolsets) && preset.toolsets.join('\u0000') === key;
+  }) || null;
+}
+
+function _emptyComposerDefaultPreset() {
+  if (!_toolsetsPresetsPayload || !_toolsetsPresetsPayload.default_preset_id) return null;
+  return (_toolsetsPresetsPayload.presets || []).find(
+    preset => preset.id === _toolsetsPresetsPayload.default_preset_id
+  ) || null;
+}
 
 function _applyToolsetsChip(toolsets) {
   _currentSessionToolsets = toolsets;
@@ -4968,15 +4987,25 @@ function _applyToolsetsChip(toolsets) {
     && !S.session
     && Array.isArray(S._pendingSessionToolsets);
   if (hasCustom) {
+    const preset = _toolsetPresetForList(toolsets);
     const stagedSuffix = isStaged ? ' (staged)' : '';
-    label.textContent = toolsets.join(', ') + stagedSuffix;
+    label.textContent = (preset ? preset.label : toolsets.join(', ')) + stagedSuffix;
     chip.classList.add('has-custom');
     chip.title = t('session_toolsets') + ': ' + toolsets.join(', ') + stagedSuffix;
   } else {
-    label.textContent = t('session_toolsets_profile_defaults');
+    const defaultPreset = (!S.session && !S._pendingSessionToolsetsExplicit)
+      ? _emptyComposerDefaultPreset()
+      : null;
+    label.textContent = defaultPreset
+      ? defaultPreset.label + ' (default'
+        + (defaultPreset.status && defaultPreset.status !== 'ready' ? ' · needs attention' : '') + ')'
+      : t('session_toolsets_profile_defaults')
+        + ((!S.session && S._pendingSessionToolsetsExplicit) ? ' (staged)' : '');
     chip.classList.remove('has-custom');
     chip.title = t('session_toolsets') + ': ' + t('session_toolsets_profile_defaults');
   }
+  const mobileLabel = $('composerMobileToolsetsLabel');
+  if (mobileLabel) mobileLabel.textContent = label.textContent;
 }
 
 function _syncToolsetsChip() {
@@ -4985,6 +5014,11 @@ function _syncToolsetsChip() {
       ? S._pendingSessionToolsets
       : null;
     _applyToolsetsChip(stagedToolsets);
+    _loadToolsetsPresets().then(function() {
+      if (!S.session) _applyToolsetsChip(
+        S._pendingSessionToolsetsExplicit ? S._pendingSessionToolsets : null
+      );
+    }).catch(function() {});
     return;
   }
   _applyToolsetsChip(S.session.enabled_toolsets || null);
@@ -4995,21 +5029,31 @@ function syncToolsetsChip() {
 }
 
 function _normalizeToolsetsCatalog(payload) {
-  const servers = payload && Array.isArray(payload.servers) ? payload.servers : [];
+  const entries = payload && Array.isArray(payload.toolsets)
+    ? payload.toolsets
+    : (payload && payload.catalog && Array.isArray(payload.catalog.toolsets)
+      ? payload.catalog.toolsets : []);
   const seen = new Set();
-  const names = [];
-  servers.forEach(function(server) {
-    const name = String((server && server.name) || '').trim();
+  const normalized = [];
+  entries.forEach(function(entry) {
+    const name = String((entry && entry.name) || '').trim();
     if (!name || seen.has(name)) return;
     seen.add(name);
-    names.push(name);
+    normalized.push({
+      name,
+      kind: entry.kind === 'mcp' ? 'mcp' : 'builtin',
+      enabled: entry.enabled !== false,
+      available: entry.available !== false,
+      registered: entry.registered === true,
+      status: entry.status || '',
+    });
   });
-  return names;
+  return normalized;
 }
 
 function _loadToolsetsCatalog() {
   if (Array.isArray(_toolsetsCatalog)) return Promise.resolve(_toolsetsCatalog);
-  return api('/api/mcp/servers')
+  return api('/api/toolsets/catalog')
     .then(function(payload) {
       _toolsetsCatalog = _normalizeToolsetsCatalog(payload);
       return _toolsetsCatalog;
@@ -5021,9 +5065,45 @@ function _loadToolsetsCatalog() {
 }
 
 function invalidateToolsetsCatalog(payload) {
-  _toolsetsCatalog = payload && Array.isArray(payload.servers) ? _normalizeToolsetsCatalog(payload) : null;
+  _toolsetsCatalog = payload ? _normalizeToolsetsCatalog(payload) : null;
+  _toolsetsPresetsPayload = null;
+  _toolsetsPresetsPromise = null;
+  _toolsetsPresetsHydratedPartial = false;
 }
 if (typeof window !== 'undefined') window.invalidateToolsetsCatalog = invalidateToolsetsCatalog;
+
+function _loadToolsetsPresets(force) {
+  if (!force && _toolsetsPresetsPayload && !_toolsetsPresetsHydratedPartial) {
+    return Promise.resolve(_toolsetsPresetsPayload);
+  }
+  if (!force && _toolsetsPresetsPromise) return _toolsetsPresetsPromise;
+  _toolsetsPresetsPromise = api('/api/toolset-presets').then(function(payload) {
+    _toolsetsPresetsPayload = payload || { presets: [], default_preset_id: null };
+    _toolsetsPresetsHydratedPartial = false;
+    _toolsetsCatalog = _normalizeToolsetsCatalog(_toolsetsPresetsPayload);
+    return _toolsetsPresetsPayload;
+  }).finally(function() { _toolsetsPresetsPromise = null; });
+  return _toolsetsPresetsPromise;
+}
+if (typeof window !== 'undefined') window.reloadToolsetPresets = function() {
+  return _loadToolsetsPresets(true);
+};
+
+function hydrateToolsetPresets(payload) {
+  if (!payload || !Array.isArray(payload.presets)) return;
+  _toolsetsPresetsPayload = payload;
+  _toolsetsPresetsHydratedPartial = true;
+  _applyToolsetsChip(
+    S.session ? (S.session.enabled_toolsets || null)
+      : (S._pendingSessionToolsetsExplicit ? S._pendingSessionToolsets : null)
+  );
+}
+if (typeof window !== 'undefined') window.hydrateToolsetPresets = hydrateToolsetPresets;
+
+// The blank composer is a real selection surface even before a session exists.
+// Hydrate its saved default proactively rather than waiting for the dropdown's
+// first open, so users can see which preset the first send will copy.
+Promise.resolve().then(function() { _syncToolsetsChip(); });
 
 function _toolsetsInputList(input) {
   if (!input) return [];
@@ -5064,6 +5144,50 @@ function _renderToolsetsPresetSections(opts) {
     : '👤 ' + t('session_toolsets_profile_defaults');
 
   section.innerHTML = '';
+  const presets = (_toolsetsPresetsPayload && _toolsetsPresetsPayload.presets) || [];
+  _appendToolsetsLabel(section, 'Saved presets');
+  if (!presets.length) {
+    _appendToolsetsLabel(section, 'No saved presets yet');
+  }
+  presets.forEach(function(preset) {
+    const row = document.createElement('div');
+    row.className = 'toolsets-preset-option'
+      + (preset.status && preset.status !== 'ready' ? ' needs-attention' : '');
+    const select = document.createElement('button');
+    select.type = 'button';
+    select.className = 'toolsets-preset-select';
+    select.dataset.toolsetPresetApply = preset.id;
+    select.disabled = preset.status !== 'ready';
+    select.textContent = preset.label
+      + (preset.id === _toolsetsPresetsPayload.default_preset_id ? ' · default' : '')
+      + (!preset.status ? ' · checking…' : (preset.status !== 'ready' ? ' · needs attention' : ''));
+    if (preset.status && preset.status !== 'ready') {
+      const problems = (preset.unknown_toolsets || []).concat(
+        (preset.unavailable_toolsets || []).map(item => item.name)
+      );
+      select.title = 'Unavailable toolsets: ' + problems.join(', ');
+    }
+    row.appendChild(select);
+    const menu = document.createElement('div');
+    menu.className = 'toolsets-preset-actions';
+    [
+      ['default', preset.id === _toolsetsPresetsPayload.default_preset_id ? 'Unset default' : 'Make default'],
+      ['rename', 'Rename'],
+      ['update', 'Update'],
+      ['delete', 'Delete'],
+    ].forEach(function(spec) {
+      const btn = document.createElement('button');
+      btn.type = 'button';
+      btn.className = 'toolsets-preset-mini';
+      btn.dataset.toolsetPresetAction = spec[0];
+      btn.dataset.presetId = preset.id;
+      btn.textContent = spec[1];
+      menu.appendChild(btn);
+    });
+    row.appendChild(menu);
+    section.appendChild(row);
+  });
+
   const defaultsBtn = document.createElement('button');
   defaultsBtn.type = 'button';
   defaultsBtn.id = 'toolsetsProfileDefaultsBtn';
@@ -5071,7 +5195,15 @@ function _renderToolsetsPresetSections(opts) {
   defaultsBtn.textContent = t('session_toolsets_use_profile_defaults');
   section.appendChild(defaultsBtn);
 
-  _appendToolsetsLabel(section, t('session_toolsets_configured_servers'));
+  const saveBtn = document.createElement('button');
+  saveBtn.type = 'button';
+  saveBtn.id = 'toolsetsSavePresetBtn';
+  saveBtn.className = 'toolsets-action-btn toolsets-clear-btn';
+  saveBtn.textContent = 'Save current as preset';
+  saveBtn.disabled = !hasCustom;
+  section.appendChild(saveBtn);
+
+  _appendToolsetsLabel(section, 'Available toolsets');
   if (_toolsetsCatalog === null) {
     _appendToolsetsLabel(section, t('session_toolsets_loading_servers'));
     return;
@@ -5084,7 +5216,8 @@ function _renderToolsetsPresetSections(opts) {
     _appendToolsetsLabel(section, t('session_toolsets_no_configured_servers'));
     return;
   }
-  _toolsetsCatalog.forEach(function(name) {
+  _toolsetsCatalog.forEach(function(entry) {
+    const name = entry.name;
     const row = document.createElement('label');
     row.className = 'toolsets-server-option';
     row.style.display = 'flex';
@@ -5097,10 +5230,39 @@ function _renderToolsetsPresetSections(opts) {
     checkbox.className = 'toolsets-server-checkbox';
     checkbox.value = name;
     checkbox.checked = selectedSet.has(name);
+    checkbox.disabled = !entry.available;
     row.appendChild(checkbox);
-    row.appendChild(document.createTextNode(name));
+    row.appendChild(document.createTextNode(
+      name + (entry.kind === 'mcp' ? ' · MCP' : '')
+      + (!entry.available ? ' · unavailable' : '')
+    ));
+    if (!entry.available && entry.kind === 'mcp') {
+      row.title = 'Enable this server in MCP Settings, then reload MCP tools.';
+    }
     section.appendChild(row);
   });
+
+  const warning = document.createElement('div');
+  warning.id = 'toolsetsChangeWarning';
+  warning.className = 'toolsets-change-warning';
+  if (_pendingToolsetChange) {
+    const copy = document.createElement('div');
+    copy.textContent = 'Changing tools rebuilds this conversation’s agent and may reduce prompt-cache reuse.';
+    warning.appendChild(copy);
+    const actions = document.createElement('div');
+    actions.className = 'toolsets-warning-actions';
+    const start = document.createElement('button');
+    start.type = 'button';
+    start.dataset.toolsetWarningAction = 'new';
+    start.textContent = 'Start new chat with this preset';
+    const change = document.createElement('button');
+    change.type = 'button';
+    change.dataset.toolsetWarningAction = 'current';
+    change.textContent = 'Change this conversation anyway';
+    actions.append(start, change);
+    warning.appendChild(actions);
+  }
+  section.appendChild(warning);
 }
 
 function _populateToolsetsDropdown() {
@@ -5129,13 +5291,17 @@ function _populateToolsetsDropdown() {
 function _positionToolsetsDropdown() {
   const dd = $('composerToolsetsDropdown');
   const chip = $('composerToolsetsChip');
+  const mobileAction = $('composerMobileToolsetsAction');
   const footer = document.querySelector('.composer-footer');
   if (!dd || !chip || !footer) return;
   // Defense: if the chip has been hidden by responsive CSS (e.g. resize across
   // 1100px container threshold while dropdown was open), don't try to anchor
   // to a zero-rect element — close the dropdown instead. (#1431)
-  if (chip.offsetParent === null) { closeToolsetsDropdown(); return; }
-  const chipRect = chip.getBoundingClientRect();
+  const panel = $('composerMobileConfigPanel');
+  const anchor = (panel && panel.classList.contains('open') && mobileAction)
+    ? mobileAction : chip;
+  if (!anchor || anchor.offsetParent === null) { closeToolsetsDropdown(); return; }
+  const chipRect = anchor.getBoundingClientRect();
   const footerRect = footer.getBoundingClientRect();
   let left = chipRect.left - footerRect.left;
   const maxLeft = Math.max(0, footer.clientWidth - dd.offsetWidth);
@@ -5146,10 +5312,11 @@ function _positionToolsetsDropdown() {
 function toggleToolsetsDropdown() {
   const dd = $('composerToolsetsDropdown');
   const chip = $('composerToolsetsChip');
+  const mobileAction = $('composerMobileToolsetsAction');
   if (!dd || !chip) return;
   // Don't open when the chip itself is hidden by responsive CSS (#1431).
   // offsetParent === null catches display:none on the element or any ancestor.
-  if (chip.offsetParent === null) return;
+  if (chip.offsetParent === null && (!mobileAction || mobileAction.offsetParent === null)) return;
   const open = dd.classList.contains('open');
   if (open) { closeToolsetsDropdown(); return; }
   if (typeof closeProfileDropdown === 'function') closeProfileDropdown();
@@ -5158,7 +5325,9 @@ function toggleToolsetsDropdown() {
   if (typeof closeReasoningDropdown === 'function') closeReasoningDropdown();
   _syncToolsetsChip();
   _populateToolsetsDropdown();
-  _loadToolsetsCatalog().then(function() {
+  // Revalidate on every open so an externally edited config.yaml (especially
+  // an MCP server being disabled) cannot leave a stale preset applyable.
+  _loadToolsetsPresets(true).then(function() {
     const stillOpen = dd && dd.classList.contains('open');
     if (stillOpen) {
       const state = $('toolsetsDropdownState');
@@ -5169,21 +5338,41 @@ function toggleToolsetsDropdown() {
   dd.classList.add('open');
   _positionToolsetsDropdown();
   chip.classList.add('active');
-  // Focus the input after a tick so the layout has settled
-  setTimeout(() => { const inp = $('toolsetsInput'); if (inp) inp.focus(); }, 50);
+  if (mobileAction) mobileAction.classList.add('active');
 }
 
 function closeToolsetsDropdown() {
   const dd = $('composerToolsetsDropdown');
   const chip = $('composerToolsetsChip');
+  const mobileAction = $('composerMobileToolsetsAction');
   if (dd) dd.classList.remove('open');
   if (chip) chip.classList.remove('active');
+  if (mobileAction) mobileAction.classList.remove('active');
+}
+
+function _sessionHasToolsetCacheRisk() {
+  if (!S.session) return false;
+  if (Number(S.session.message_count || 0) > 0) return true;
+  return Array.isArray(S.messages) && S.messages.some(message => message && message.role);
+}
+
+function _requestSessionToolsets(toolsets, label) {
+  if (_sessionHasToolsetCacheRisk()) {
+    _pendingToolsetChange = { toolsets, label: label || '' };
+    const state = $('toolsetsDropdownState');
+    const input = $('toolsetsInput');
+    _renderToolsetsPresetSections({ state, input });
+    return;
+  }
+  _applySessionToolsets(toolsets);
+  closeToolsetsDropdown();
 }
 
 function _applySessionToolsets(toolsets) {
   if (typeof S === 'undefined' || !S) return;
   if (!S.session) {
     S._pendingSessionToolsets = toolsets;
+    S._pendingSessionToolsetsExplicit = true;
     _applyToolsetsChip(toolsets);
     if (Array.isArray(toolsets) && toolsets.length) {
       showToast('🔧 ' + t('session_toolsets_applied') + ': ' + toolsets.join(', '));
@@ -5192,6 +5381,7 @@ function _applySessionToolsets(toolsets) {
     }
     return;
   }
+  _pendingToolsetChange = null;
   const sid = S.session.session_id;
   api('/api/session/toolsets', {
     method: 'POST',
@@ -5215,16 +5405,119 @@ function _applySessionToolsets(toolsets) {
     });
 }
 
+function _toolsetPresetById(presetId) {
+  return ((_toolsetsPresetsPayload && _toolsetsPresetsPayload.presets) || [])
+    .find(preset => preset.id === presetId) || null;
+}
+
+async function _refreshToolsetPresetsUi() {
+  await _loadToolsetsPresets(true);
+  _syncToolsetsChip();
+  const state = $('toolsetsDropdownState');
+  const input = $('toolsetsInput');
+  if (state && input) _renderToolsetsPresetSections({ state, input });
+}
+
+async function _saveCurrentToolsetPreset() {
+  const toolsets = _toolsetsInputList($('toolsetsInput'));
+  if (!toolsets.length) return;
+  const label = await showPromptDialog({
+    title: 'Save toolset preset',
+    message: 'Name this exact toolset allowlist.',
+    placeholder: 'Everyday',
+    confirmLabel: 'Save',
+  });
+  if (label == null || !label.trim()) return;
+  await api('/api/toolset-presets', {
+    method: 'POST',
+    body: JSON.stringify({ label: label.trim(), toolsets }),
+  });
+  await _refreshToolsetPresetsUi();
+  showToast('Toolset preset saved');
+}
+
+async function _manageToolsetPreset(action, presetId) {
+  const preset = _toolsetPresetById(presetId);
+  if (!preset) return;
+  if (action === 'default') {
+    const nextId = _toolsetsPresetsPayload.default_preset_id === preset.id ? null : preset.id;
+    await api('/api/toolset-presets/default', {
+      method: 'PATCH', body: JSON.stringify({ preset_id: nextId }),
+    });
+  } else if (action === 'rename') {
+    const label = await showPromptDialog({
+      title: 'Rename toolset preset', value: preset.label, selectAll: true,
+      confirmLabel: 'Rename',
+    });
+    if (label == null || !label.trim()) return;
+    await api('/api/toolset-presets/' + encodeURIComponent(preset.id), {
+      method: 'PUT', body: JSON.stringify({ label: label.trim(), toolsets: preset.toolsets }),
+    });
+  } else if (action === 'update') {
+    const toolsets = _toolsetsInputList($('toolsetsInput'));
+    if (!toolsets.length) return;
+    const ok = await showConfirmDialog({
+      title: 'Update toolset preset',
+      message: 'Replace “' + preset.label + '” with the exact toolsets currently shown?',
+      confirmLabel: 'Update',
+    });
+    if (!ok) return;
+    await api('/api/toolset-presets/' + encodeURIComponent(preset.id), {
+      method: 'PUT', body: JSON.stringify({ label: preset.label, toolsets }),
+    });
+  } else if (action === 'delete') {
+    const ok = await showConfirmDialog({
+      title: 'Delete toolset preset',
+      message: 'Existing conversations will keep their copied toolset selection.',
+      confirmLabel: 'Delete', danger: true, focusCancel: true,
+    });
+    if (!ok) return;
+    await api('/api/toolset-presets/' + encodeURIComponent(preset.id), { method: 'DELETE' });
+  }
+  await _refreshToolsetPresetsUi();
+}
+
 // Click-outside handler for toolsets dropdown
 document.addEventListener('click', function(e) {
   if (
     !e.target.closest('#composerToolsetsChip') &&
+    !e.target.closest('#composerMobileToolsetsAction') &&
     !e.target.closest('#composerToolsetsDropdown')
   ) closeToolsetsDropdown();
   // Active profile defaults button
   if (e.target.closest('#toolsetsProfileDefaultsBtn')) {
-    _applySessionToolsets(null);
-    closeToolsetsDropdown();
+    _requestSessionToolsets(null, t('session_toolsets_profile_defaults'));
+    return;
+  }
+  const presetApply = e.target.closest('[data-toolset-preset-apply]');
+  if (presetApply) {
+    const preset = _toolsetPresetById(presetApply.dataset.toolsetPresetApply);
+    if (preset && preset.status === 'ready') {
+      _requestSessionToolsets(preset.toolsets.slice(), preset.label);
+    }
+    return;
+  }
+  const presetAction = e.target.closest('[data-toolset-preset-action]');
+  if (presetAction) {
+    _manageToolsetPreset(presetAction.dataset.toolsetPresetAction, presetAction.dataset.presetId)
+      .catch(err => showToast(err.message || String(err), 3000, 'error'));
+    return;
+  }
+  if (e.target.closest('#toolsetsSavePresetBtn')) {
+    _saveCurrentToolsetPreset().catch(err => showToast(err.message || String(err), 3000, 'error'));
+    return;
+  }
+  const warningAction = e.target.closest('[data-toolset-warning-action]');
+  if (warningAction && _pendingToolsetChange) {
+    const change = _pendingToolsetChange;
+    _pendingToolsetChange = null;
+    if (warningAction.dataset.toolsetWarningAction === 'new') {
+      closeToolsetsDropdown();
+      newSession(true, { enabled_toolsets: change.toolsets });
+    } else {
+      _applySessionToolsets(change.toolsets);
+      closeToolsetsDropdown();
+    }
     return;
   }
   // Apply button
@@ -5241,13 +5534,11 @@ document.addEventListener('click', function(e) {
       showToast(t('session_toolsets_desc'), 2000);
       return;
     }
-    _applySessionToolsets(toolsets);
-    closeToolsetsDropdown();
+    _requestSessionToolsets(toolsets, 'Custom override');
   }
   // Clear button
   if (e.target.closest('#toolsetsClearBtn')) {
-    _applySessionToolsets(null);
-    closeToolsetsDropdown();
+    _requestSessionToolsets(null, t('session_toolsets_profile_defaults'));
   }
 });
 
@@ -5260,7 +5551,7 @@ document.addEventListener('change', function(e) {
   const checked = Array.from(document.querySelectorAll('#toolsetsPresetSections .toolsets-server-checkbox:checked'))
     .map(el => String(el.value || '').trim())
     .filter(Boolean);
-  const catalogSet = new Set(Array.isArray(_toolsetsCatalog) ? _toolsetsCatalog : []);
+  const catalogSet = new Set(Array.isArray(_toolsetsCatalog) ? _toolsetsCatalog.map(entry => entry.name) : []);
   const manual = _toolsetsInputList(input).filter(name => !catalogSet.has(name));
   input.value = checked.concat(manual).join(', ');
   _renderToolsetsPresetSections({ state, input });
@@ -5274,7 +5565,10 @@ window.addEventListener('resize', () => {
   const dd = $('composerToolsetsDropdown');
   if (!dd || !dd.classList.contains('open')) return;
   const chip = $('composerToolsetsChip');
-  if (!chip || chip.offsetParent === null) { closeToolsetsDropdown(); return; }
+  const mobileAction = $('composerMobileToolsetsAction');
+  if ((!chip || chip.offsetParent === null) && (!mobileAction || mobileAction.offsetParent === null)) {
+    closeToolsetsDropdown(); return;
+  }
   _positionToolsetsDropdown();
 });
 
@@ -5338,7 +5632,8 @@ document.addEventListener('click',function(e){
     e.target.closest('#composerMobileConfigPanel') ||
     e.target.closest('#composerWsDropdown') ||
     e.target.closest('#composerModelDropdown') ||
-    e.target.closest('#composerReasoningDropdown')
+    e.target.closest('#composerReasoningDropdown') ||
+    e.target.closest('#composerToolsetsDropdown')
   ) return;
   closeMobileComposerConfig();
 });
@@ -19687,7 +19982,7 @@ async function promptNewFile(targetDir = S.currentDir || '.'){
       // System-minted session (#6022): explicit worktree:false — creating a
       // file from a blank page must not inherit the config worktree default.
       const r=await api('/api/session/new',{method:'POST',body:JSON.stringify({workspace:ws,worktree:false})});
-      if(r&&r.session){S._pendingSessionToolsets=null;S.session=r.session;S.messages=[];syncTopbar();renderMessages();await renderSessionList();}
+      if(r&&r.session){S._pendingSessionToolsets=null;S._pendingSessionToolsetsExplicit=false;S.session=r.session;S.messages=[];syncTopbar();renderMessages();await renderSessionList();}
     }catch(e){setStatus(t('create_failed')+e.message);return;}
   }
   if(!S.session)return;
@@ -19720,7 +20015,7 @@ async function promptNewFolder(targetDir = S.currentDir || '.'){
       // System-minted session (#6022): explicit worktree:false — creating a
       // folder from a blank page must not inherit the config worktree default.
       const r=await api('/api/session/new',{method:'POST',body:JSON.stringify({workspace:ws,worktree:false})});
-      if(r&&r.session){S._pendingSessionToolsets=null;S.session=r.session;S.messages=[];syncTopbar();renderMessages();await renderSessionList();}
+      if(r&&r.session){S._pendingSessionToolsets=null;S._pendingSessionToolsetsExplicit=false;S.session=r.session;S.messages=[];syncTopbar();renderMessages();await renderSessionList();}
     }catch(e){setStatus(t('folder_create_failed')+e.message);return;}
   }
   if(!S.session)return;

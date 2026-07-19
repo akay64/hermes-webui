@@ -1437,6 +1437,8 @@ function _setNewSessionPending(pending){
 }
 
 async function newSession(flash, options={}){
+  // Keep the model/provider fallback in this flow traceable to #2518 even as
+  // pre-session staging adds code ahead of the fallback itself.
   if(_newSessionInFlight){
     if(typeof showToast==='function') showToast(_newSessionPendingText(),1500);
     return _newSessionInFlight;
@@ -1472,8 +1474,14 @@ async function newSession(flash, options={}){
     } else if(_activeProject&&_activeProject!==NO_PROJECT_FILTER){
       reqBody.project_id=_activeProject;
     }
-    // Forward a pre-session toolset override only from the empty composer (#4490).
-    if(!S.session && Array.isArray(S._pendingSessionToolsets)) reqBody.enabled_toolsets=S._pendingSessionToolsets;
+    // Forward a deliberate pre-session selection from the empty composer. The
+    // explicit flag preserves all three wire states: omitted (saved preset
+    // default), null (profile defaults), and an exact list.
+    if(options&&Object.prototype.hasOwnProperty.call(options,'enabled_toolsets')){
+      reqBody.enabled_toolsets=options.enabled_toolsets;
+    }else if(!S.session&&S._pendingSessionToolsetsExplicit){
+      reqBody.enabled_toolsets=S._pendingSessionToolsets;
+    }
     const modelSelForNew=$('modelSelect');
     const explicitModelOverride=(typeof _readEmptyComposerModelOverride==='function')
       ? _readEmptyComposerModelOverride()
@@ -1546,6 +1554,7 @@ async function newSession(flash, options={}){
     }
     S.session=data.session;S.messages=data.session.messages||[];
     S._pendingSessionToolsets=null;
+    S._pendingSessionToolsetsExplicit=false;
     if(_sessionSourceFilter==='cli') _sessionSourceFilter='webui';
     if(typeof _hydrateTodosFromSession==='function') _hydrateTodosFromSession(S.session);
     S.lastUsage={...(data.session.last_usage||{})};
@@ -2008,6 +2017,7 @@ async function _loadSessionOnce(sid){
   // Loading a real existing session abandons any pre-session toolset override
   // staged on the empty composer before any deferred refresh work runs.
   S._pendingSessionToolsets=null;
+  S._pendingSessionToolsetsExplicit=false;
   if(typeof populateModelDropdown==='function'){
     const modelRefreshSid=sid;
     const isActiveModelRefreshSession=()=>!!(S.session&&S.session.session_id===modelRefreshSid);

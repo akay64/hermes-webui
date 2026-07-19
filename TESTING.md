@@ -1010,6 +1010,33 @@ FAIL: Error shown, crash, or unfiltered list still displayed.
 
 ---
 
+## Toolset Presets
+
+Use an isolated `HERMES_HOME` for manual preset tests. Verify the composer at
+wide desktop, ordinary laptop/narrow, and mobile widths.
+
+1. Save an exact allowlist as a preset, rename/update it, make it the default,
+   reload, and confirm the same state is read from
+   `<HERMES_HOME>/webui/toolset_presets.json`.
+2. On the empty composer, confirm the default preset is visible before the
+   first send. Create a chat and verify its session JSON contains a copied
+   `enabled_toolsets` array.
+3. Change or delete the preset and verify the existing session array is
+   unchanged.
+4. In a conversation with messages, select another preset. Verify the
+   prompt-cache warning offers **Start new chat with this preset** first and
+   **Change this conversation anyway** second.
+5. Disable an MCP server referenced by a preset. Verify the preset is marked
+   **needs attention**, identifies the server, and cannot be applied. Re-enable
+   and reload MCP tools before retrying.
+6. For TickTick, confirm a preset needs only `ticktick` and that the resulting
+   agent exposes all registered TickTick tools except those under
+   `tools.exclude`.
+
+Automated coverage lives in `tests/test_toolset_presets.py`,
+`tests/test_toolset_presets_ui.py`, and
+`tests/test_issue4490_presession_toolsets.py`.
+
 ## Section 21: Workspace File Operations (Sprint 4)
 
 ### T21.1: Delete Button Appears on File Hover

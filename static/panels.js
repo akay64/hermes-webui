@@ -6306,7 +6306,7 @@ async function promptWorkspacePath(){
       // System-minted session (#6022): worktree:false is explicit so a config
       // worktree default can't leak a worktree from a workspace prompt.
       const r=await api('/api/session/new',{method:'POST',body:JSON.stringify({workspace:ws,worktree:false})});
-      if(r&&r.session){S._pendingSessionToolsets=null;S.session=r.session;S.messages=[];if(typeof syncTopbar==='function')syncTopbar();if(typeof renderMessages==='function')renderMessages();if(typeof renderSessionList==='function')await renderSessionList();}
+      if(r&&r.session){S._pendingSessionToolsets=null;S._pendingSessionToolsetsExplicit=false;S.session=r.session;S.messages=[];if(typeof syncTopbar==='function')syncTopbar();if(typeof renderMessages==='function')renderMessages();if(typeof renderSessionList==='function')await renderSessionList();}
     }catch(e){showToast(t('workspace_switch_failed')+e.message);return;}
     if(!S.session)return;
   }
@@ -6344,7 +6344,7 @@ async function switchToWorkspace(path,name){
       // System-minted session (#6022): explicit worktree:false — a workspace
       // switch from a blank page is not deliberate New Chat intent.
       const r=await api('/api/session/new',{method:'POST',body:JSON.stringify({workspace:ws,worktree:false})});
-      if(r&&r.session){S._pendingSessionToolsets=null;S.session=r.session;S.messages=[];if(typeof syncTopbar==='function')syncTopbar();if(typeof renderMessages==='function')renderMessages();if(typeof renderSessionList==='function')await renderSessionList();}
+      if(r&&r.session){S._pendingSessionToolsets=null;S._pendingSessionToolsetsExplicit=false;S.session=r.session;S.messages=[];if(typeof syncTopbar==='function')syncTopbar();if(typeof renderMessages==='function')renderMessages();if(typeof renderSessionList==='function')await renderSessionList();}
     }catch(e){if(typeof setStatus==='function')setStatus(t('switch_failed')+e.message);return;}
     if(!S.session)return;
   }
@@ -6408,6 +6408,7 @@ async function switchToWorkspace(path,name){
     // Clear the one-shot flag so a subsequent newSession() inherits this choice instead.
     S._profileSwitchWorkspace=null;
     S._pendingSessionToolsets=null;
+    S._pendingSessionToolsetsExplicit=false;
     syncTopbar();
     if(
       restoreComposerFocusTarget&&
@@ -6927,6 +6928,7 @@ async function switchToProfile(name) {
   // nothing. (#4662 Opus gate)
   if (name && name === S.activeProfile) return true;
   S._pendingSessionToolsets=null;
+  S._pendingSessionToolsetsExplicit=false;
   // Profile switches are per-client cookie/TLS scoped, so a running stream in
   // the current session can safely continue while this tab moves to another
   // profile. The in-flight session stays attached to its original profile.
@@ -7009,6 +7011,18 @@ async function switchToProfile(name) {
     if (_switchGen !== _profileSwitchGeneration) return false;
     S.activeProfile = data.active || name;
     S.activeProfileIsDefault = !!data.is_default;
+    if (typeof window.invalidateToolsetsCatalog === 'function') {
+      window.invalidateToolsetsCatalog(null);
+    }
+    if (typeof window.reloadToolsetPresets === 'function') {
+      window.reloadToolsetPresets().then(function() {
+        if (typeof syncToolsetsChip === 'function') syncToolsetsChip();
+      }).catch(function() {
+        if (typeof syncToolsetsChip === 'function') syncToolsetsChip();
+      });
+    } else if (typeof syncToolsetsChip === 'function') {
+      syncToolsetsChip();
+    }
     if (typeof _resetCronUnreadForProfileSwitch === 'function') {
       _resetCronUnreadForProfileSwitch();
     }

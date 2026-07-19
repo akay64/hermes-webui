@@ -13385,6 +13385,7 @@ def handle_get(handler, parsed) -> bool:
 
     if parsed.path == "/api/profile/active":
         from api import profiles as profiles_api
+        from api.toolset_presets import load_store as _load_toolset_preset_store
 
         active_profile_name = profiles_api.get_active_profile_name()
         # Resolve the ACTIVE PROFILE's configured workspace so a cold boot with a
@@ -13400,6 +13401,16 @@ def handle_get(handler, parsed) -> bool:
         except Exception:
             logger.debug("Failed to resolve profile default workspace for /api/profile/active", exc_info=True)
             _profile_default_workspace = None
+        try:
+            _profile_toolset_presets = _load_toolset_preset_store(
+                profiles_api.get_active_hermes_home()
+            )
+        except Exception:
+            # Profile boot must remain available if an administrator has to
+            # repair a malformed preset file; the dedicated endpoint reports
+            # the validation error and the UI fails closed when opened.
+            logger.warning("Failed to load toolset presets for active profile", exc_info=True)
+            _profile_toolset_presets = None
         return j(
             handler,
             {
@@ -13407,6 +13418,7 @@ def handle_get(handler, parsed) -> bool:
                 "path": str(profiles_api.get_active_hermes_home()),
                 "is_default": profiles_api._is_root_profile(active_profile_name),
                 "default_workspace": _profile_default_workspace,
+                "toolset_presets": _profile_toolset_presets,
             },
         )
 
@@ -13417,6 +13429,12 @@ def handle_get(handler, parsed) -> bool:
     # ── MCP Servers (GET) ──
     if parsed.path == "/api/mcp/servers":
         return _handle_mcp_servers_list(handler)
+
+    if parsed.path == "/api/toolsets/catalog":
+        return j(handler, _toolset_catalog_payload())
+
+    if parsed.path == "/api/toolset-presets":
+        return _handle_toolset_presets_list(handler)
 
     # ── MCP Tools (GET) ──
     if parsed.path == "/api/mcp/tools":
@@ -13724,6 +13742,9 @@ def handle_post(handler, parsed) -> bool:
             diag.finish()
         return True
 
+    if parsed.path == "/api/toolset-presets":
+        return _handle_toolset_preset_create(handler, body)
+
     if parsed.path == "/api/escape/authorize":
         return _handle_escape_authorize(handler, parsed, body)
 
@@ -13987,10 +14008,23 @@ def handle_post(handler, parsed) -> bool:
             body.get("model"),
             body.get("model_provider"),
         )
-        try:
-            enabled_toolsets = _validate_session_toolsets_shape(body.get("enabled_toolsets"))
-        except ValueError as e:
-            return bad(handler, str(e), status=400)
+        # Three-value toolset contract:
+        #   omitted -> copy the saved profile default preset (if configured)
+        #   null    -> explicitly use active profile defaults
+        #   list    -> use the exact per-session allowlist
+        # Presence is deliberate: body.get() would conflate omitted and null.
+        if "enabled_toolsets" in body:
+            try:
+                enabled_toolsets = _validate_session_toolsets_shape(body["enabled_toolsets"])
+            except ValueError as e:
+                return bad(handler, str(e), status=400)
+        else:
+            try:
+                enabled_toolsets = _default_toolsets_for_new_chat(
+                    profile=body.get("profile") or None
+                )
+            except ValueError as e:
+                return bad(handler, str(e), status=409)
         # Use the profile sent by the client tab (if any) so that two tabs on
         # different profiles never clobber each other via the process-level global.
         # ── Memory lifecycle: commit the previous session before starting a new one ──
@@ -15347,7 +15381,7 @@ def handle_post(handler, parsed) -> bool:
                 return bad(handler, "Profile is bound to the current session", 403)
             # process_wide=False: don't mutate the process-global _active_profile.
             # Per-client profile is managed via cookie + thread-local (#798).
-            result = switch_profile(name, process_wide=False)
+            result = dict(switch_profile(name, process_wide=False) or {})
             # Invalidate the models cache so the very next /api/models request
             # rebuilds from the new profile's config.yaml rather than returning
             # the old profile's cached model list (#1200 — profile-switch model bug).
@@ -16364,6 +16398,8 @@ def handle_patch(handler, parsed) -> bool:
     if parsed.path.startswith("/api/mcp/servers/"):
         name = parsed.path[len("/api/mcp/servers/"):]
         return _handle_mcp_server_toggle(handler, name, body)
+    if parsed.path == "/api/toolset-presets/default":
+        return _handle_toolset_preset_default(handler, body)
     if parsed.path.startswith("/api/kanban/"):
         from api.kanban_bridge import handle_kanban_patch
 
@@ -16392,6 +16428,9 @@ def handle_delete(handler, parsed) -> bool:
     if parsed.path.startswith("/api/mcp/servers/"):
         name = parsed.path[len("/api/mcp/servers/"):]
         return _handle_mcp_server_delete(handler, name)
+    if parsed.path.startswith("/api/toolset-presets/"):
+        preset_id = parsed.path[len("/api/toolset-presets/"):]
+        return _handle_toolset_preset_delete(handler, preset_id)
     if parsed.path == "/api/prompts":
         pid = str(body.get("id") or "").strip()
         if not pid:
@@ -16428,6 +16467,9 @@ def handle_put(handler, parsed) -> bool:
     if parsed.path.startswith("/api/mcp/servers/"):
         name = parsed.path[len("/api/mcp/servers/"):]
         return _handle_mcp_server_update(handler, name, body)
+    if parsed.path.startswith("/api/toolset-presets/"):
+        preset_id = parsed.path[len("/api/toolset-presets/"):]
+        return _handle_toolset_preset_update(handler, preset_id, body)
     return False
 
 # ── GET route helpers ─────────────────────────────────────────────────────────
@@ -25654,6 +25696,186 @@ def _server_summary(name, cfg, runtime_status=None):
         out["status"] = "configured"
     out["tool_count"] = runtime_status.get("tools") if runtime_status else None
     return out
+
+
+# ── Toolset preset helpers ──────────────────────────────────────────────────
+
+def _toolset_preset_home(profile=None) -> Path:
+    if profile:
+        from api.profiles import get_hermes_home_for_profile
+
+        return Path(get_hermes_home_for_profile(profile))
+    return Path(get_active_hermes_home())
+
+
+def _toolset_catalog_payload(*, profile=None, include_runtime=True) -> dict:
+    """Return safe built-in and MCP availability for one profile."""
+    home = _toolset_preset_home(profile)
+    cfg = get_config_for_profile_home(home)
+    resolved = set(_resolve_cli_toolsets(cfg))
+    servers = cfg.get("mcp_servers", {}) if isinstance(cfg, dict) else {}
+    if not isinstance(servers, dict):
+        servers = {}
+    # Preset-list hydration is boot-critical for the empty composer label and
+    # must not wait for MCP registry inspection. The dedicated catalog endpoint
+    # includes runtime state; preset CRUD only needs config-level availability.
+    runtime = _mcp_runtime_status_by_name() if include_runtime else {}
+    mcp_names = {str(name) for name in servers}
+    built_in_names = []
+    for name in list(getattr(api_config, "_DEFAULT_TOOLSETS", [])) + list(resolved):
+        name = str(name or "").strip()
+        if not name or name in mcp_names or name.startswith("mcp-") or name in built_in_names:
+            continue
+        built_in_names.append(name)
+    builtins = [
+        {
+            "name": name,
+            "kind": "builtin",
+            "enabled": True,
+            "available": name in resolved,
+            "registered": name in resolved,
+        }
+        for name in built_in_names
+    ]
+    mcp = []
+    for raw_name, raw_cfg in servers.items():
+        name = str(raw_name)
+        summary = _server_summary(name, raw_cfg, runtime.get(name))
+        mcp.append({
+            "name": name,
+            "kind": "mcp",
+            "enabled": bool(summary.get("enabled")),
+            # Enabled MCP servers may register lazily when an agent is built.
+            "available": bool(summary.get("enabled")) and summary.get("status") != "invalid_config",
+            "registered": bool(summary.get("active")),
+            "status": summary.get("status"),
+            "tool_count": summary.get("tool_count"),
+        })
+    return {"builtins": builtins, "mcp": mcp, "toolsets": builtins + mcp}
+
+
+def _annotate_toolset_preset(preset: dict, catalog: dict) -> dict:
+    by_name = {item["name"]: item for item in catalog.get("toolsets", [])}
+    unavailable = []
+    unknown = []
+    for name in preset.get("toolsets", []):
+        entry = by_name.get(name)
+        if entry is None:
+            unknown.append(name)
+        elif not entry.get("available"):
+            unavailable.append({
+                "name": name,
+                "kind": entry.get("kind"),
+                "status": entry.get("status") or "unavailable",
+            })
+    result = dict(preset)
+    result["toolsets"] = list(preset.get("toolsets", []))
+    result["status"] = "needs_attention" if unknown or unavailable else "ready"
+    result["unknown_toolsets"] = unknown
+    result["unavailable_toolsets"] = unavailable
+    return result
+
+
+def _load_toolset_presets_payload(*, profile=None) -> dict:
+    from api.toolset_presets import load_store
+
+    data = load_store(_toolset_preset_home(profile))
+    catalog = _toolset_catalog_payload(profile=profile, include_runtime=False)
+    return {
+        "version": data["version"],
+        "default_preset_id": data["default_preset_id"],
+        "presets": [_annotate_toolset_preset(preset, catalog) for preset in data["presets"]],
+        "catalog": catalog,
+    }
+
+
+def _toolset_preset_error(handler, exc):
+    from api.toolset_presets import ToolsetPresetError
+
+    if isinstance(exc, ToolsetPresetError):
+        return bad(handler, str(exc), status=400)
+    raise exc
+
+
+def _handle_toolset_presets_list(handler):
+    try:
+        return j(handler, _load_toolset_presets_payload())
+    except Exception as exc:
+        return _toolset_preset_error(handler, exc)
+
+
+def _handle_toolset_preset_create(handler, body):
+    from api.toolset_presets import create_preset
+
+    try:
+        preset = create_preset(
+            _toolset_preset_home(), label=body.get("label"), toolsets=body.get("toolsets")
+        )
+        return j(handler, {"ok": True, "preset": _annotate_toolset_preset(
+            preset, _toolset_catalog_payload()
+        )}, status=201)
+    except Exception as exc:
+        return _toolset_preset_error(handler, exc)
+
+
+def _handle_toolset_preset_update(handler, preset_id, body):
+    from api.toolset_presets import update_preset
+
+    preset_id = unquote(preset_id)
+    try:
+        preset = update_preset(
+            _toolset_preset_home(), preset_id,
+            label=body.get("label"), toolsets=body.get("toolsets"),
+        )
+        return j(handler, {"ok": True, "preset": _annotate_toolset_preset(
+            preset, _toolset_catalog_payload()
+        )})
+    except KeyError:
+        return bad(handler, "Toolset preset not found", status=404)
+    except Exception as exc:
+        return _toolset_preset_error(handler, exc)
+
+
+def _handle_toolset_preset_delete(handler, preset_id):
+    from api.toolset_presets import delete_preset
+
+    try:
+        data = delete_preset(_toolset_preset_home(), unquote(preset_id))
+        return j(handler, {"ok": True, "default_preset_id": data["default_preset_id"]})
+    except KeyError:
+        return bad(handler, "Toolset preset not found", status=404)
+    except Exception as exc:
+        return _toolset_preset_error(handler, exc)
+
+
+def _handle_toolset_preset_default(handler, body):
+    from api.toolset_presets import set_default
+
+    if "preset_id" not in body:
+        return bad(handler, "preset_id is required", status=400)
+    try:
+        data = set_default(_toolset_preset_home(), body["preset_id"])
+        return j(handler, {"ok": True, "default_preset_id": data["default_preset_id"]})
+    except KeyError:
+        return bad(handler, "Toolset preset not found", status=404)
+    except Exception as exc:
+        return _toolset_preset_error(handler, exc)
+
+
+def _default_toolsets_for_new_chat(*, profile=None) -> list[str] | None:
+    """Resolve and validate a saved default for an ordinary user-created chat."""
+    from api.toolset_presets import default_toolsets
+
+    toolsets = default_toolsets(_toolset_preset_home(profile))
+    if toolsets is None:
+        return None
+    annotated = _annotate_toolset_preset({"toolsets": toolsets}, _toolset_catalog_payload(profile=profile))
+    if annotated["status"] != "ready":
+        problems = annotated["unknown_toolsets"] + [
+            item["name"] for item in annotated["unavailable_toolsets"]
+        ]
+        raise ValueError("Default toolset preset needs attention: " + ", ".join(problems))
+    return list(toolsets)
 
 
 def _mcp_safe_display_text(value, *, limit: int) -> str:
