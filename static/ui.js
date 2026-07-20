@@ -314,7 +314,8 @@ function _renderUserFencedBlocks(text){
   const sentContextHtml=(label,quoteText)=>{
     const safeLabel=String(label||'').trim()||'Context';
     const safeQuote=String(quoteText||'').replace(/\s+$/,'');
-    return `<figure class="sent-selection-context" data-selected-context="1"><figcaption class="sent-selection-context-label">${esc(safeLabel)}</figcaption><blockquote class="sent-selection-context-quote">${esc(safeQuote)}</blockquote></figure>`;
+    const safePreview=(safeQuote.split('\n').find(line=>line.trim())||'').trim();
+    return `<details class="sent-selection-context" data-selected-context="1"><summary class="sent-selection-context-summary"><span class="sent-selection-context-label">${esc(safeLabel)}</span><span class="sent-selection-context-preview">${esc(safePreview)}</span></summary><blockquote class="sent-selection-context-quote">${esc(safeQuote)}</blockquote></details>`;
   };
   const stashContext=(label,quote)=>{contextStash.push(sentContextHtml(label,quote));return '\x00UC'+(contextStash.length-1)+'\x00';};
   const stashSelectedContextBlocks=(value)=>{
