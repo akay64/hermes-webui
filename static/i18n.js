@@ -62,6 +62,10 @@ const LOCALES = {
     context_block_rename_hint: 'Click or press Enter to rename',
     context_block_rename_aria: 'Rename context block',
     context_block_remove: 'Remove context block',
+    context_blocks_count: (n) => n === 1 ? '1 context' : `${n} contexts`,
+    context_blocks_expand: 'Expand selected contexts',
+    context_blocks_collapse: 'Collapse selected contexts',
+    context_blocks_clear_all: 'Clear all',
 
     diff_loading: 'Loading diff',
     diff_error: 'Could not load patch file',
