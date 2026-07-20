@@ -179,6 +179,7 @@ if(typeof window!=='undefined'){
   window._hasPendingSelections=function(){return _pendingSelections.length>0;};
 }
 let _selectedTextReplyRaf=0;
+let _pendingSelectionAnnotationResizeRaf=0;
 const _persistentStateToastSeen=new Set();
 const _thinkPairs=[
   {open:'<think>',close:'</think>'},
@@ -943,11 +944,18 @@ document.addEventListener('click',(e)=>{
 },{capture:false});
 
 const _PENDING_CONTEXT_HIGHLIGHT_NAME='hermes-pending-context';
+const _pendingSelectionRangesById=new Map();
+const _pendingContextFlashTimers=new WeakMap();
 
 function _clearPendingSelectionAnnotationVisuals(root){
+  if(_pendingSelectionAnnotationResizeRaf){
+    window.cancelAnimationFrame(_pendingSelectionAnnotationResizeRaf);
+    _pendingSelectionAnnotationResizeRaf=0;
+  }
   try{
     if(typeof CSS!=='undefined'&&CSS.highlights)CSS.highlights.delete(_PENDING_CONTEXT_HIGHLIGHT_NAME);
   }catch(_err){}
+  _pendingSelectionRangesById.clear();
   const scope=root&&root.querySelectorAll?root:document;
   scope.querySelectorAll('.pending-context-bubble-layer').forEach(node=>node.remove());
   scope.querySelectorAll('.pending-context-source').forEach(node=>node.classList.remove('pending-context-source'));
@@ -1029,15 +1037,84 @@ function _resolvePendingSelectionRange(selection,root){
   }
 }
 
+function _positionPendingContextBubbles(layers){
+  layers.forEach(group=>{
+    const sourceNode=group&&group.sourceNode;
+    const items=group&&group.items||[];
+    if(!sourceNode||!items.length)return;
+    // Measure against the actual absolute-positioning layer. Depending on the
+    // message type, the source node's padding edge can differ from its border
+    // rect; using sourceNode.getBoundingClientRect() introduces that offset.
+    const layerRect=group.layer.getBoundingClientRect();
+    const positioned=items.map(item=>{
+      const rect=item.range.getBoundingClientRect();
+      const size=Math.max(1,item.bubble.offsetHeight||34);
+      const desired=Math.max(0,rect.top-layerRect.top+((rect.height-size)/2));
+      return {...item,size,desired};
+    }).sort((a,b)=>a.desired-b.desired);
+    let cursor=0;
+    while(cursor<positioned.length){
+      let end=cursor+1;
+      const gap=positioned[cursor].size+6;
+      while(end<positioned.length&&positioned[end].desired-positioned[end-1].desired<gap)end++;
+      const cluster=positioned.slice(cursor,end);
+      const span=Math.max(0,(cluster.length-1)*gap);
+      const average=cluster.reduce((sum,item)=>sum+item.desired,0)/cluster.length;
+      // Do not clamp to sourceRect.height. On narrow layouts, wide tables and
+      // other contained Markdown blocks can paint below the assistant segment's
+      // measured box; clamping would pull a correctly resolved lower selection
+      // back toward the top. The layer permits vertical overflow intentionally.
+      const start=Math.max(0,average-(span/2));
+      cluster.forEach((item,index)=>{item.bubble.style.top=`${Math.round(start+(index*gap))}px`;});
+      cursor=end;
+    }
+  });
+}
+
 function _focusPendingSelectionCard(id){
   const safeId=window.CSS&&CSS.escape?CSS.escape(id):String(id).replace(/"/g,'\\"');
-  const card=document.querySelector(`[data-selection-id="${safeId}"]`);
-  if(!card)return;
-  if(_selectionTrayCollapsed)_setSelectionTrayCollapsed(false);
-  card.scrollIntoView({block:'nearest',behavior:'smooth'});
-  const name=card.querySelector('.selection-chip-name');
-  if(name&&typeof name.focus==='function')name.focus({preventScroll:true});
+  const reveal=()=>{
+    const card=document.querySelector(`[data-selection-id="${safeId}"]`);
+    if(!card)return;
+    card.classList.remove('pending-context-focus-flash');
+    void card.offsetWidth;
+    card.classList.add('pending-context-focus-flash');
+    const previousTimer=_pendingContextFlashTimers.get(card);
+    if(previousTimer)clearTimeout(previousTimer);
+    const clearFlash=()=>{
+      card.classList.remove('pending-context-focus-flash');
+      const timer=_pendingContextFlashTimers.get(card);
+      if(timer)clearTimeout(timer);
+      _pendingContextFlashTimers.delete(card);
+    };
+    _pendingContextFlashTimers.set(card,setTimeout(clearFlash,900));
+    card.addEventListener('animationend',clearFlash,{once:true});
+    card.scrollIntoView({block:'center',behavior:'smooth'});
+    const name=card.querySelector('.selection-chip-name');
+    if(name&&typeof name.focus==='function')name.focus({preventScroll:true});
+  };
+  if(_selectionTrayCollapsed){
+    _setSelectionTrayCollapsed(false);
+    window.requestAnimationFrame(reveal);
+    return;
+  }
+  reveal();
 }
+
+function _pendingSelectionAnnotationClick(e){
+  if(!e||!e.target||e.target.closest&&e.target.closest('.pending-context-bubble'))return;
+  const root=document.getElementById('messages');
+  if(!root||!root.contains(e.target))return;
+  for(const [id,range] of _pendingSelectionRangesById){
+    for(const rect of range.getClientRects()){
+      if(e.clientX>=rect.left&&e.clientX<=rect.right&&e.clientY>=rect.top&&e.clientY<=rect.bottom){
+        _focusPendingSelectionCard(id);
+        return;
+      }
+    }
+  }
+}
+document.addEventListener('click',_pendingSelectionAnnotationClick);
 
 function _syncPendingSelectionAnnotationLabels(){
   _pendingSelections.forEach(selection=>{
@@ -1058,15 +1135,17 @@ function _renderPendingSelectionAnnotations(root){
     const resolved=_resolvePendingSelectionRange(selection,root);
     if(!resolved)return;
     ranges.push(resolved.range);
+    _pendingSelectionRangesById.set(selection.id,resolved.range);
     const sourceNode=resolved.sourceNode;
     sourceNode.classList.add('pending-context-source');
-    let layer=layers.get(sourceNode);
-    if(!layer){
-      layer=document.createElement('div');
+    let group=layers.get(sourceNode);
+    if(!group){
+      const layer=document.createElement('div');
       layer.className='pending-context-bubble-layer';
       layer.setAttribute('aria-label',_selectedTextReplyT('context_annotations_label','Selected contexts'));
       sourceNode.appendChild(layer);
-      layers.set(sourceNode,layer);
+      group={sourceNode,layer,items:[]};
+      layers.set(sourceNode,group);
     }
     const bubble=document.createElement('button');
     bubble.type='button';
@@ -1076,15 +1155,25 @@ function _renderPendingSelectionAnnotations(root){
     bubble.title=selection.name;
     bubble.setAttribute('aria-label',selection.name);
     bubble.addEventListener('click',()=>_focusPendingSelectionCard(selection.id));
-    layer.appendChild(bubble);
+    group.layer.appendChild(bubble);
+    group.items.push({bubble,range:resolved.range});
   });
   try{
     if(ranges.length&&typeof CSS!=='undefined'&&CSS.highlights&&typeof Highlight==='function'){
       CSS.highlights.set(_PENDING_CONTEXT_HIGHLIGHT_NAME,new Highlight(...ranges));
     }
   }catch(_err){}
+  _positionPendingContextBubbles(layers);
 }
 if(typeof window!=='undefined')window._renderPendingSelectionAnnotations=_renderPendingSelectionAnnotations;
+
+function _schedulePendingSelectionAnnotationLayout(){
+  if(!_pendingSelections.length||_pendingSelectionAnnotationResizeRaf)return;
+  _pendingSelectionAnnotationResizeRaf=window.requestAnimationFrame(()=>{
+    _pendingSelectionAnnotationResizeRaf=0;
+    _renderPendingSelectionAnnotations();
+  });
+}
 
 function _addNamedContextBlock(text, source){
   const id='ctx-'+(++_selectionIdCounter);
@@ -1421,7 +1510,10 @@ if(typeof document!=='undefined'){
   document.addEventListener('keyup', e=>{
     if(e.key&&/Arrow|Shift|Control|Meta|Alt/.test(e.key))_updateSelectedTextReplyButton();
   });
-  window.addEventListener('resize', _hideSelectedTextReplyButton);
+  window.addEventListener('resize',()=>{
+    _hideSelectedTextReplyButton();
+    _schedulePendingSelectionAnnotationLayout();
+  });
 }
 
 // Guard against concurrent send() calls.  Without this, two rapid sends
