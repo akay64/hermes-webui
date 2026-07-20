@@ -15418,7 +15418,10 @@ function renderMessages(options){
       _scrollAfterMessageRender(preserveScroll, scrollSnapshot);
       if(_maybeRecoverVirtualizedBlankViewport(options, preserveScroll, virtualWindow)) return;
       _updateMessageVirtualMeasurements(renderVisWithIdx, renderVisibleIdxs, virtualWindow);
-      requestAnimationFrame(()=>_postProcessWithAnchorSuppression(inner));
+      requestAnimationFrame(()=>{
+        _postProcessWithAnchorSuppression(inner);
+        if(typeof _renderPendingSelectionAnnotations==='function') _renderPendingSelectionAnnotations(inner);
+      });
       if(typeof _initMediaPlaybackObserver==='function') _initMediaPlaybackObserver();
       if(typeof loadTodos==='function'&&document.getElementById('panelTodos')&&document.getElementById('panelTodos').classList.contains('active')){loadTodos();}
       return;
@@ -16886,7 +16889,10 @@ function renderMessages(options){
   _scrollAfterMessageRender(preserveScroll, scrollSnapshot);
   if(_maybeRecoverVirtualizedBlankViewport(options, preserveScroll, virtualWindow)) return;
   // Apply syntax highlighting after DOM is built
-  requestAnimationFrame(()=>_postProcessWithAnchorSuppression(inner));
+  requestAnimationFrame(()=>{
+    _postProcessWithAnchorSuppression(inner);
+    if(typeof _renderPendingSelectionAnnotations==='function') _renderPendingSelectionAnnotations(inner);
+  });
   // Refresh todo panel if it's currently open
   if(typeof loadTodos==='function' && document.getElementById('panelTodos') && document.getElementById('panelTodos').classList.contains('active')){
     loadTodos();

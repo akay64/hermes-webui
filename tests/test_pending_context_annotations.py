@@ -66,20 +66,73 @@ def test_annotation_projection_is_idempotent_and_has_no_observer_or_render_loop(
     projection = _function_body(
         MESSAGES,
         "function _renderPendingSelectionAnnotations(root){",
-        "function _addNamedContextBlock(text, source){",
+        "if(typeof window!=='undefined')window._renderPendingSelectionAnnotations",
     )
     assert "_clearPendingSelectionAnnotationVisuals(root);" in projection
     assert "MutationObserver" not in projection
     assert "ResizeObserver" not in projection
     assert "requestAnimationFrame" not in projection
     assert "renderMessages(" not in projection
-    assert "getBoundingClientRect" not in projection
+    assert "_positionPendingContextBubbles(layers);" in projection
     assert "CSS.highlights.set" in projection
+
+    positioning = _function_body(
+        MESSAGES,
+        "function _positionPendingContextBubbles(layers){",
+        "function _focusPendingSelectionCard(id){",
+    )
+    assert "range.getBoundingClientRect()" in positioning
+    assert "group.layer.getBoundingClientRect()" in positioning
+    assert "MutationObserver" not in positioning
+    assert "ResizeObserver" not in positioning
+    assert "requestAnimationFrame" not in positioning
+    assert "renderMessages(" not in positioning
+
+
+def test_highlight_and_bubble_share_the_same_context_focus_action():
+    assert "function _pendingSelectionAnnotationClick(e){" in MESSAGES
+    click_body = _function_body(
+        MESSAGES,
+        "function _pendingSelectionAnnotationClick(e){",
+        "function _syncPendingSelectionAnnotationLabels(){",
+    )
+    assert "range.getClientRects()" in click_body
+    assert "_focusPendingSelectionCard(id);" in click_body
+    assert "document.addEventListener('click',_pendingSelectionAnnotationClick);" in MESSAGES
+
+
+def test_collapsed_tray_focus_runs_after_disclosure_and_flashes_target_once():
+    focus_body = _function_body(
+        MESSAGES,
+        "function _focusPendingSelectionCard(id){",
+        "function _pendingSelectionAnnotationClick(e){",
+    )
+    assert "if(_selectionTrayCollapsed){" in focus_body
+    assert "_setSelectionTrayCollapsed(false);" in focus_body
+    assert "window.requestAnimationFrame(reveal);" in focus_body
+    assert "pending-context-focus-flash" in focus_body
+    assert "scrollIntoView({block:'center',behavior:'smooth'})" in focus_body
+
+
+def test_resize_realign_is_single_frame_coalesced_and_cancellable():
+    schedule = _function_body(
+        MESSAGES,
+        "function _schedulePendingSelectionAnnotationLayout(){",
+        "function _addNamedContextBlock(text, source){",
+    )
+    assert "if(!_pendingSelections.length||_pendingSelectionAnnotationResizeRaf)return;" in schedule
+    assert "window.requestAnimationFrame" in schedule
+    assert "_renderPendingSelectionAnnotations();" in schedule
+    assert "MutationObserver" not in schedule
+    assert "renderMessages(" not in schedule
+    assert "window.cancelAnimationFrame(_pendingSelectionAnnotationResizeRaf);" in MESSAGES
 
 
 def test_existing_transcript_render_paths_reapply_pending_visuals_after_rebuild():
-    assert UI.count("_renderPendingSelectionAnnotations(inner)") >= 2
+    assert UI.count("_renderPendingSelectionAnnotations(inner)") >= 4
+    assert UI.count("_postProcessWithAnchorSuppression(inner);") >= 2
     assert "::highlight(hermes-pending-context)" in STYLE
     assert ".pending-context-bubble" in STYLE
     assert ".pending-context-source" in STYLE
+    assert "@keyframes pending-context-focus-flash" in STYLE
     assert "context_annotations_label: 'Selected contexts'" in I18N
