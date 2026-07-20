@@ -47,6 +47,7 @@ function _renderUserFencedBlocks(text){
   });
   s=_stashUserSelectedContextBlocks(s, stashContext);
   s=esc(s).replace(/\n/g,'<br>');
+  s=s.replace(/(\x00UC\d+\x00)(?:<br>){1,2}(?=\x00UC\d+\x00)/g,'$1');
   s=s.replace(/\x00UF(\d+)\x00/g,(_,i)=>stash[+i]);
   s=s.replace(/\x00UC(\d+)\x00/g,(_,i)=>contextStash[+i]||'');
   return s;
@@ -83,6 +84,18 @@ def test_sent_selected_context_parser_accepts_user_renamed_edge_labels():
     assert 'class="sent-selection-context"' in html
     assert '<figcaption class="sent-selection-context-label">*Evidence: alpha</figcaption>' in html
     assert "***Evidence" not in html
+
+
+def test_adjacent_sent_context_cards_do_not_keep_payload_blank_lines():
+    html = _run_user_renderer(
+        "Before contexts.\n\n"
+        "**Context 1:**\n<!-- hermes-selected-context -->\n> first line\n> hidden detail\n\n"
+        "**Context 2:**\n<!-- hermes-selected-context -->\n> second selection"
+    )
+
+    assert "Before contexts.<br><br><figure" in html
+    assert "</figure><figure" in html
+    assert "</figure><br>" not in html
 
 
 def test_matching_shape_inside_user_code_fence_stays_code_not_context_card():
