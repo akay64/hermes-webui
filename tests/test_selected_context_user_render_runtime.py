@@ -13,7 +13,8 @@ function esc(s){return String(s??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&l
 function _sentSelectionContextBlockHtml(label, quoteText){
   const safeLabel=String(label||'').trim()||'Context';
   const safeQuote=String(quoteText||'').replace(/\s+$/,'');
-  return `<figure class="sent-selection-context" data-selected-context="1"><figcaption class="sent-selection-context-label">${esc(safeLabel)}</figcaption><blockquote class="sent-selection-context-quote">${esc(safeQuote)}</blockquote></figure>`;
+  const safePreview=(safeQuote.split('\n').find(line=>line.trim())||'').trim();
+  return `<details class="sent-selection-context" data-selected-context="1"><summary class="sent-selection-context-summary"><span class="sent-selection-context-label">${esc(safeLabel)}</span><span class="sent-selection-context-preview">${esc(safePreview)}</span></summary><blockquote class="sent-selection-context-quote">${esc(safeQuote)}</blockquote></details>`;
 }
 function _stashUserSelectedContextBlocks(text, stashContext){
   const lines=String(text||'').split('\n');
@@ -70,9 +71,12 @@ def test_sent_selected_context_renders_as_semantic_card_and_escapes_content():
         "<!-- hermes-selected-context -->\n> <script>alert(1)</script>\n> second line"
     )
 
-    assert '<figure class="sent-selection-context" data-selected-context="1">' in html
-    assert '<figcaption class="sent-selection-context-label">&lt;img src=x onerror=alert(1)&gt;</figcaption>' in html
+    assert '<details class="sent-selection-context" data-selected-context="1">' in html
+    assert '<summary class="sent-selection-context-summary">' in html
+    assert '<span class="sent-selection-context-label">&lt;img src=x onerror=alert(1)&gt;</span>' in html
+    assert '<span class="sent-selection-context-preview">&lt;script&gt;alert(1)&lt;/script&gt;</span>' in html
     assert '<blockquote class="sent-selection-context-quote">&lt;script&gt;alert(1)&lt;/script&gt;\nsecond line</blockquote>' in html
+    assert "<details open" not in html
     assert "**<img" not in html
     assert "&gt; &lt;script" not in html
     assert "<script>" not in html
@@ -82,7 +86,7 @@ def test_sent_selected_context_parser_accepts_user_renamed_edge_labels():
     html = _run_user_renderer("***Evidence: alpha:**\n<!-- hermes-selected-context -->\n> quoted")
 
     assert 'class="sent-selection-context"' in html
-    assert '<figcaption class="sent-selection-context-label">*Evidence: alpha</figcaption>' in html
+    assert '<span class="sent-selection-context-label">*Evidence: alpha</span>' in html
     assert "***Evidence" not in html
 
 
@@ -93,9 +97,9 @@ def test_adjacent_sent_context_cards_do_not_keep_payload_blank_lines():
         "**Context 2:**\n<!-- hermes-selected-context -->\n> second selection"
     )
 
-    assert "Before contexts.<br><br><figure" in html
-    assert "</figure><figure" in html
-    assert "</figure><br>" not in html
+    assert "Before contexts.<br><br><details" in html
+    assert "</details><details" in html
+    assert "</details><br>" not in html
 
 
 def test_matching_shape_inside_user_code_fence_stays_code_not_context_card():
