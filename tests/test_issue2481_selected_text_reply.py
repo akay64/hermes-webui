@@ -55,11 +55,11 @@ def test_selected_text_reply_collects_named_context_blocks_without_dumping_into_
     assert "replace(/\\n{3,}/g,'\\n\\n')" in js
     assert "map(line=>`> ${line}`).join('\\n')" in js
 
-    assert "function _addNamedContextBlock(text)" in js
+    assert "function _addNamedContextBlock(text, source)" in js
     assert "function _renderSelectionChips()" in js
     assert "function _flushSelectionBlocksToComposer()" in js
-    assert "_pendingSelections.push({id, name, text})" in js
-    assert "_addNamedContextBlock(_selectedTextReplyText)" in js
+    assert "_pendingSelections.push({id, name, text, ordinal:_selectionIdCounter, source:source||null})" in js
+    assert "_addNamedContextBlock(_selectedTextReplyText,_selectedTextReplyInfo&&_selectedTextReplyInfo.source)" in js
     assert "**${s.name}:**\\n${_formatSelectedTextReplyQuote(s.text)}" in js
     assert "composer.dispatchEvent(new Event('input',{bubbles:true}))" in js
     assert "if(typeof autoResize==='function') autoResize()" in js
@@ -159,20 +159,25 @@ def test_sent_selected_context_blocks_are_rendered_without_enabling_user_markdow
 
     assert "const sentContextHtml=(label,quoteText)=>" in ui
     assert "const stashSelectedContextBlocks=(value)=>" in ui
-    assert "<figure class=\"sent-selection-context\" data-selected-context=\"1\">" in ui
-    assert "<figcaption class=\"sent-selection-context-label\">" in ui
+    assert "<details class=\"sent-selection-context\" data-selected-context=\"1\">" in ui
+    assert "<summary class=\"sent-selection-context-summary\">" in ui
+    assert "<span class=\"sent-selection-context-label\">" in ui
+    assert "<span class=\"sent-selection-context-preview\">" in ui
     assert "<blockquote class=\"sent-selection-context-quote\">" in ui
     assert "${esc(safeLabel)}" in ui
+    assert "${esc(safePreview)}" in ui
     assert "${esc(safeQuote)}" in ui
     assert "s=esc(s).replace(/\\n/g,'<br>')" in ui
     assert "s=s.replace(/\\x00UC(\\d+)\\x00/g" in ui
 
     css = read("static/style.css")
-    quote_rule = re.search(r'\.sent-selection-context-quote\{([^}]*)\}', css)
-    assert quote_rule
-    assert "white-space:nowrap" in quote_rule.group(1)
-    assert "overflow:hidden" in quote_rule.group(1)
-    assert "text-overflow:ellipsis" in quote_rule.group(1)
+    preview_rule = re.search(r'\.sent-selection-context-preview\{([^}]*)\}', css)
+    assert preview_rule
+    assert "white-space:nowrap" in preview_rule.group(1)
+    assert "overflow:hidden" in preview_rule.group(1)
+    assert "text-overflow:ellipsis" in preview_rule.group(1)
+    assert ".sent-selection-context[open] .sent-selection-context-preview{display:none;}" in css
+    assert "white-space:pre-wrap" in css
 
 
 
