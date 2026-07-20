@@ -783,23 +783,32 @@ function _selectedTextReplySourceForRange(range){
   const endEl=range.endContainer.nodeType===Node.ELEMENT_NODE?range.endContainer:range.endContainer.parentElement;
   const startBody=startEl&&startEl.closest?startEl.closest('.msg-body'):null;
   const endBody=endEl&&endEl.closest?endEl.closest('.msg-body'):null;
-  if(!startBody||startBody!==endBody)return null;
+  if(!startBody)return null;
+  const sourceRange=range.cloneRange();
+  if(startBody!==endBody){
+    // Triple-click paragraph selection commonly includes the generated line
+    // break after the final block, placing the range endpoint just outside the
+    // message body. Keep that whitespace-only boundary selection attributable
+    // to this body, but continue rejecting genuine cross-message selections.
+    try{sourceRange.setEnd(startBody,startBody.childNodes.length);}catch(_err){return null;}
+    if(sourceRange.toString().trim()!==range.toString().trim())return null;
+  }
   const source=startBody.closest('[data-session-msg-idx]');
-  if(!source||!source.contains(range.startContainer)||!source.contains(range.endContainer))return null;
+  if(!source||!source.contains(sourceRange.startContainer)||!source.contains(sourceRange.endContainer))return null;
   const sessionMsgIdx=Number(source.dataset&&source.dataset.sessionMsgIdx);
   if(!Number.isFinite(sessionMsgIdx))return null;
   try{
     const before=document.createRange();
     before.selectNodeContents(startBody);
-    before.setEnd(range.startContainer,range.startOffset);
+    before.setEnd(sourceRange.startContainer,sourceRange.startOffset);
     const through=document.createRange();
     through.selectNodeContents(startBody);
-    through.setEnd(range.endContainer,range.endOffset);
+    through.setEnd(sourceRange.endContainer,sourceRange.endOffset);
     const start=before.toString().length;
     const end=through.toString().length;
     if(end<=start)return null;
     const bodyText=String(startBody.textContent||'').replace(/\u00a0/g,' ');
-    const exact=String(range.toString()||'').replace(/\u00a0/g,' ');
+    const exact=String(sourceRange.toString()||'').replace(/\u00a0/g,' ');
     if(!exact)return null;
     return {
       sessionId:String(S&&S.session&&S.session.session_id||''),
@@ -990,40 +999,49 @@ function _resolvePendingSelectionRange(selection,root){
   const source=selection&&selection.source;
   if(!source||!root||String(source.sessionId||'')!==String(S&&S.session&&S.session.session_id||''))return null;
   const selector=`[data-session-msg-idx="${String(source.sessionMsgIdx).replace(/"/g,'\\"')}"]`;
-  const sourceNode=root.querySelector(selector);
-  if(!sourceNode)return null;
-  const body=sourceNode.matches&&sourceNode.matches('.msg-body')?sourceNode:sourceNode.querySelector('.msg-body');
-  if(!body)return null;
-  const nodes=_pendingSelectionTextNodes(body);
-  if(!nodes.length)return null;
-  const bodyText=nodes.map(node=>String(node.nodeValue||'')).join('').replace(/\u00a0/g,' ');
+  const sourceNodes=Array.from(root.querySelectorAll(selector));
+  if(!sourceNodes.length)return null;
   const exact=String(source.exact||'').replace(/\u00a0/g,' ');
   if(!exact)return null;
-  let start=Number(source.start);
-  let end=Number(source.end);
-  if(!Number.isFinite(start)||!Number.isFinite(end)||bodyText.slice(start,end)!==exact){
-    const matches=[];
-    let cursor=0;
-    while(cursor<=bodyText.length-exact.length){
-      const found=bodyText.indexOf(exact,cursor);
-      if(found<0)break;
-      matches.push(found);
-      cursor=found+Math.max(1,exact.length);
-    }
-    if(matches.length!==1){
-      const contextual=matches.filter(found=>{
-        const prefix=String(source.prefix||'');
-        const suffix=String(source.suffix||'');
-        return (!prefix||bodyText.slice(Math.max(0,found-prefix.length),found)===prefix)&&
-          (!suffix||bodyText.slice(found+exact.length,found+exact.length+suffix.length)===suffix);
-      });
-      if(contextual.length!==1)return null;
-      start=contextual[0];
+  const capturedStart=Number(source.start);
+  const capturedEnd=Number(source.end);
+  const candidates=[];
+  for(const sourceNode of sourceNodes){
+    const body=sourceNode.matches&&sourceNode.matches('.msg-body')?sourceNode:sourceNode.querySelector('.msg-body');
+    if(!body)continue;
+    const nodes=_pendingSelectionTextNodes(body);
+    if(!nodes.length)continue;
+    const bodyText=nodes.map(node=>String(node.nodeValue||'')).join('').replace(/\u00a0/g,' ');
+    const starts=[];
+    const capturedMatches=Number.isFinite(capturedStart)&&Number.isFinite(capturedEnd)&&bodyText.slice(capturedStart,capturedEnd)===exact;
+    if(capturedMatches){
+      starts.push(capturedStart);
     }else{
-      start=matches[0];
+      let cursor=0;
+      while(cursor<=bodyText.length-exact.length){
+        const found=bodyText.indexOf(exact,cursor);
+        if(found<0)break;
+        starts.push(found);
+        cursor=found+Math.max(1,exact.length);
+      }
     }
-    end=start+exact.length;
+    starts.forEach(start=>{
+      const prefix=String(source.prefix||'');
+      const suffix=String(source.suffix||'');
+      const contextual=(!prefix||bodyText.slice(Math.max(0,start-prefix.length),start)===prefix)&&
+        (!suffix||bodyText.slice(start+exact.length,start+exact.length+suffix.length)===suffix);
+      candidates.push({sourceNode,nodes,start,end:start+exact.length,contextual,direct:capturedMatches});
+    });
   }
+  if(!candidates.length)return null;
+  let matches=candidates.filter(candidate=>candidate.direct);
+  if(matches.length!==1){
+    const contextual=candidates.filter(candidate=>candidate.contextual);
+    if(contextual.length===1)matches=contextual;
+    else if(candidates.length===1)matches=candidates;
+    else return null;
+  }
+  const {sourceNode,nodes,start,end}=matches[0];
   const startPoint=_pendingSelectionPointAt(nodes,start);
   const endPoint=_pendingSelectionPointAt(nodes,end);
   if(!startPoint||!endPoint)return null;
@@ -1049,7 +1067,7 @@ function _positionPendingContextBubbles(layers){
     const positioned=items.map(item=>{
       const rect=item.range.getBoundingClientRect();
       const size=Math.max(1,item.bubble.offsetHeight||34);
-      const desired=Math.max(0,rect.top-layerRect.top+((rect.height-size)/2));
+      const desired=Math.max(0,rect.top-layerRect.top);
       return {...item,size,desired};
     }).sort((a,b)=>a.desired-b.desired);
     let cursor=0;

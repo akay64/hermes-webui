@@ -89,6 +89,31 @@ def test_annotation_projection_is_idempotent_and_has_no_observer_or_render_loop(
     assert "renderMessages(" not in positioning
 
 
+def test_range_resolution_checks_every_rendered_segment_of_the_message():
+    resolution = _function_body(
+        MESSAGES,
+        "function _resolvePendingSelectionRange(selection,root){",
+        "function _positionPendingContextBubbles(layers){",
+    )
+    assert "root.querySelectorAll(selector)" in resolution
+    assert "for(const sourceNode of sourceNodes)" in resolution
+    assert "bodyText.slice(capturedStart,capturedEnd)===exact" in resolution
+    assert "return {range,sourceNode};" in resolution
+
+
+def test_paragraph_selection_can_include_only_trailing_boundary_whitespace():
+    capture = _function_body(
+        MESSAGES,
+        "function _selectedTextReplySourceForRange(range){",
+        "function _selectedTextReplySelection(){",
+    )
+    assert "const sourceRange=range.cloneRange();" in capture
+    assert "sourceRange.setEnd(startBody,startBody.childNodes.length);" in capture
+    assert "sourceRange.toString().trim()!==range.toString().trim()" in capture
+    assert "before.setEnd(sourceRange.startContainer,sourceRange.startOffset);" in capture
+    assert "through.setEnd(sourceRange.endContainer,sourceRange.endOffset);" in capture
+
+
 def test_highlight_and_bubble_share_the_same_context_focus_action():
     assert "function _pendingSelectionAnnotationClick(e){" in MESSAGES
     click_body = _function_body(
@@ -136,3 +161,14 @@ def test_existing_transcript_render_paths_reapply_pending_visuals_after_rebuild(
     assert ".pending-context-source" in STYLE
     assert "@keyframes pending-context-focus-flash" in STYLE
     assert "context_annotations_label: 'Selected contexts'" in I18N
+
+
+def test_annotation_bubbles_overlay_without_reflow_and_fade_on_hover():
+    assert ".pending-context-source>.msg-body" not in STYLE
+    assert "const desired=Math.max(0,rect.top-layerRect.top);" in MESSAGES
+    bubble_rule = STYLE[STYLE.index(".pending-context-bubble{"):]
+    bubble_rule = bubble_rule[:bubble_rule.index("}")]
+    assert "opacity" in bubble_rule
+    hover_rule = STYLE[STYLE.index(".pending-context-bubble:hover{"):]
+    hover_rule = hover_rule[:hover_rule.index("}")]
+    assert "opacity:" in hover_rule
