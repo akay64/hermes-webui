@@ -74,6 +74,7 @@ _METADATA_FIELDS = frozenset(
         "read_only",
         "enabled_toolsets",
         "composer_draft",
+        "prompt_stash",
     }
 )
 
