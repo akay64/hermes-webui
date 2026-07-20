@@ -386,6 +386,10 @@ function _renderUserFencedBlocks(text){
   s=stashSelectedContextBlocks(s);
   // Escape remaining plain text and convert newlines to <br>
   s=esc(s).replace(/\n/g,'<br>');
+  // Context blocks already provide their own compact card spacing. Remove the
+  // payload's blank-line separators only when one sent context directly follows
+  // another, while preserving normal spacing around the user's written prompt.
+  s=s.replace(/(\x00UC\d+\x00)(?:<br>){1,2}(?=\x00UC\d+\x00)/g,'$1');
   // Restore stashed code/context blocks, then math placeholders as KaTeX targets.
   s=s.replace(/\x00UF(\d+)\x00/g,(_,i)=>stash[+i]);
   s=s.replace(/\x00UC(\d+)\x00/g,(_,i)=>contextStash[+i]||'');

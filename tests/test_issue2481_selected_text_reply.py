@@ -167,6 +167,13 @@ def test_sent_selected_context_blocks_are_rendered_without_enabling_user_markdow
     assert "s=esc(s).replace(/\\n/g,'<br>')" in ui
     assert "s=s.replace(/\\x00UC(\\d+)\\x00/g" in ui
 
+    css = read("static/style.css")
+    quote_rule = re.search(r'\.sent-selection-context-quote\{([^}]*)\}', css)
+    assert quote_rule
+    assert "white-space:nowrap" in quote_rule.group(1)
+    assert "overflow:hidden" in quote_rule.group(1)
+    assert "text-overflow:ellipsis" in quote_rule.group(1)
+
 
 
 def test_selected_text_reply_queue_path_includes_pending_selection_context():
