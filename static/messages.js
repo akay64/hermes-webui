@@ -169,6 +169,8 @@ let _selectedTextReplyBtn=null;
 let _selectedTextReplyText='';
 let _pendingSelections=[];  // [{id, name, text}] — named context blocks
 let _selectionIdCounter=0;
+let _selectionTrayCollapsed=false;
+let _selectionTrayScrollTop=0;
 // #4380: expose a pending-selection predicate so the composer's primary-action
 // content check (_composerHasContent in ui.js) treats selection-only replies as
 // sendable content even though they no longer live in the textarea.
@@ -753,9 +755,9 @@ function _showPersistentStateToast(kind, name, options){
   showToast(t('memory_saved'),3600,'success');
 }
 
-function _selectedTextReplyT(key, fallback){
+function _selectedTextReplyT(key, fallback, ...args){
   try{
-    const val=(typeof t==='function')?t(key):'';
+    const val=(typeof t==='function')?t(key,...args):'';
     return val&&val!==key?val:fallback;
   }catch(_err){
     return fallback;
@@ -904,18 +906,24 @@ function _addNamedContextBlock(text){
   const id='ctx-'+(++_selectionIdCounter);
   const name=(_selectedTextReplyT('context_block_name_default','Context'))+' '+_selectionIdCounter;
   _pendingSelections.push({id, name, text});
-  _renderSelectionChips();
+  _renderSelectionChips({revealId:id});
   return id;
 }
 
 function _removeNamedContextBlock(id){
   _pendingSelections=_pendingSelections.filter(s=>s.id!==id);
   if(!_pendingSelections.length)_selectionIdCounter=0;
+  if(!_pendingSelections.length){
+    _selectionTrayCollapsed=false;
+    _selectionTrayScrollTop=0;
+  }
   _renderSelectionChips();
 }
 
 function _clearPendingSelections(){
   _selectionIdCounter=0;
+  _selectionTrayCollapsed=false;
+  _selectionTrayScrollTop=0;
   if(!_pendingSelections.length)return false;
   _pendingSelections=[];
   _renderSelectionChips();
@@ -930,16 +938,108 @@ function _selectedContextPreview(text){
   return normalized.length>max?normalized.slice(0,max).trimEnd()+'…':normalized;
 }
 
+function _selectionTrayCountLabel(count){
+  const fallback=count===1?'1 context':`${count} contexts`;
+  return _selectedTextReplyT('context_blocks_count',fallback,count);
+}
+
+function _syncSelectionTrayDisclosure(){
+  const wrap=document.getElementById('composerSelectionChips');
+  const toggle=document.getElementById('composerSelectionToggle');
+  const list=document.getElementById('composerSelectionList');
+  if(!wrap||!toggle||!list)return;
+  wrap.classList.toggle('is-collapsed',_selectionTrayCollapsed);
+  toggle.setAttribute('aria-expanded', _selectionTrayCollapsed?'false':'true');
+  list.hidden=_selectionTrayCollapsed;
+  const label=_selectionTrayCollapsed
+    ?_selectedTextReplyT('context_blocks_expand','Expand selected contexts')
+    :_selectedTextReplyT('context_blocks_collapse','Collapse selected contexts');
+  toggle.setAttribute('aria-label',label);
+  toggle.title=label;
+  const polyline=toggle.querySelector('svg polyline');
+  if(polyline)polyline.setAttribute('points',_selectionTrayCollapsed?'18 15 12 9 6 15':'6 9 12 15 18 9');
+  if(!_selectionTrayCollapsed){
+    window.requestAnimationFrame(()=>{
+      const current=document.getElementById('composerSelectionList');
+      if(current)current.scrollTop=Math.min(_selectionTrayScrollTop,Math.max(0,current.scrollHeight-current.clientHeight));
+    });
+  }
+}
+
+function _setSelectionTrayCollapsed(collapsed){
+  const list=document.getElementById('composerSelectionList');
+  if(!_selectionTrayCollapsed&&list)_selectionTrayScrollTop=list.scrollTop;
+  _selectionTrayCollapsed=!!collapsed;
+  _syncSelectionTrayDisclosure();
+}
+
 function _renderSelectionChips(){
+  const options=arguments[0]||{};
   const wrap=document.getElementById('composerSelectionChips');
   if(!wrap)return;
+  const previousList=document.getElementById('composerSelectionList');
+  if(previousList&&_pendingSelections.length&&!_selectionTrayCollapsed)_selectionTrayScrollTop=previousList.scrollTop;
   wrap.innerHTML='';
   wrap.hidden=!_pendingSelections.length;
+  if(!_pendingSelections.length){
+    if(typeof updateSendBtn==='function') updateSendBtn();
+    return;
+  }
+
+  const toolbar=document.createElement('div');
+  toolbar.className='composer-selection-toolbar';
+
+  const toggle=document.createElement('button');
+  toggle.type='button';
+  toggle.id='composerSelectionToggle';
+  toggle.className='composer-selection-toggle';
+  toggle.setAttribute('aria-controls','composerSelectionList');
+  toggle.addEventListener('click',()=>_setSelectionTrayCollapsed(!_selectionTrayCollapsed));
+
+  const count=document.createElement('span');
+  count.className='composer-selection-count';
+  count.textContent=_selectionTrayCountLabel(_pendingSelections.length);
+
+  const chevron=document.createElementNS('http://www.w3.org/2000/svg','svg');
+  chevron.classList.add('composer-selection-chevron');
+  chevron.setAttribute('viewBox','0 0 24 24');
+  chevron.setAttribute('fill','none');
+  chevron.setAttribute('stroke','currentColor');
+  chevron.setAttribute('stroke-width','2');
+  chevron.setAttribute('stroke-linecap','round');
+  chevron.setAttribute('stroke-linejoin','round');
+  chevron.setAttribute('aria-hidden','true');
+  const polyline=document.createElementNS('http://www.w3.org/2000/svg','polyline');
+  chevron.appendChild(polyline);
+  toggle.appendChild(count);
+  toggle.appendChild(chevron);
+
+  const clearAll=document.createElement('button');
+  clearAll.type='button';
+  clearAll.id='composerSelectionClear';
+  clearAll.className='composer-selection-clear';
+  clearAll.textContent=_selectedTextReplyT('context_blocks_clear_all','Clear all');
+  clearAll.setAttribute('aria-label',_selectedTextReplyT('context_blocks_clear_all','Clear all'));
+  clearAll.addEventListener('click',()=>{
+    _clearPendingSelections();
+    const composer=(typeof $==='function'&&$('msg'))||document.getElementById('msg');
+    if(composer&&typeof composer.focus==='function')composer.focus({preventScroll:true});
+  });
+
+  toolbar.appendChild(toggle);
+  toolbar.appendChild(clearAll);
+  wrap.appendChild(toolbar);
+
+  const list=document.createElement('div');
+  list.id='composerSelectionList';
+  list.className='composer-selection-list';
+  list.setAttribute('role','list');
   _pendingSelections.forEach(s=>{
     const card=document.createElement('article');
     card.className='selection-context-card';
     card.dataset.selectionId=s.id;
     card.setAttribute('aria-label', s.name);
+    card.setAttribute('role','listitem');
 
     const accent=document.createElement('div');
     accent.className='selection-context-accent';
@@ -984,7 +1084,19 @@ function _renderSelectionChips(){
     body.appendChild(quote);
     card.appendChild(accent);
     card.appendChild(body);
-    wrap.appendChild(card);
+    list.appendChild(card);
+  });
+  wrap.appendChild(list);
+  _syncSelectionTrayDisclosure();
+  window.requestAnimationFrame(()=>{
+    const current=document.getElementById('composerSelectionList');
+    if(!current||_selectionTrayCollapsed)return;
+    if(options.revealId){
+      current.scrollTop=current.scrollHeight;
+      _selectionTrayScrollTop=current.scrollTop;
+      return;
+    }
+    current.scrollTop=Math.min(_selectionTrayScrollTop,Math.max(0,current.scrollHeight-current.clientHeight));
   });
   // #4380: pending selection cards are content the primary Send button must
   // recognize (they were moved out of the textarea into _pendingSelections),
