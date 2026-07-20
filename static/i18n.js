@@ -66,6 +66,7 @@ const LOCALES = {
     context_blocks_expand: 'Expand selected contexts',
     context_blocks_collapse: 'Collapse selected contexts',
     context_blocks_clear_all: 'Clear all',
+    context_annotations_label: 'Selected contexts',
 
     diff_loading: 'Loading diff',
     diff_error: 'Could not load patch file',
