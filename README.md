@@ -200,6 +200,7 @@ If an AI assistant is helping with install, reinstall, bootstrap, provider setup
 - Send a message while one is processing -- it queues automatically
 - Edit any past user message inline and regenerate from that point
 - Retry the last assistant response with one click
+- Saved prompts plus a session-scoped prompt stash for temporarily setting aside unfinished text and consuming it when restored
 - Cancel a running task directly from the composer footer (Stop button next to Send)
 - Tool call cards inline -- each shows the tool name, args, and result snippet; expand/collapse all toggle for multi-tool turns
 - Subagent delegation cards -- child agent activity shown with distinct icon and indented border

@@ -9443,7 +9443,7 @@ _SETTINGS_DEFAULTS = {
     "auto_scroll_follow": True,  # follow new output to the bottom while streaming (Codex/Claude-Code-style sticky bottom); the user scrolling up unpins and is respected
     "worklog_details_expanded_default": False,  # opt-in: expand Worklog details by default; default remains folded
     "hide_composer_attach": False,  # hide attach button in composer footer
-    "hide_composer_saved_prompts": False,  # hide saved prompts button in composer footer
+    "hide_composer_saved_prompts": False,  # hide saved/stashed prompts button in composer footer
     "hide_composer_mic": False,  # hide dictation mic button in composer footer
     "show_titlebar_profile": False,  # show profile switcher in app titlebar (opt-in)
     "hide_composer_voice_mode": False,  # hide hands-free voice-mode button in composer footer

@@ -11693,6 +11693,59 @@ def _save_saved_prompts(prompts: list) -> None:
     p.write_text(json.dumps(prompts, ensure_ascii=False, indent=2), encoding="utf-8")
 
 
+_PROMPT_STASH_MAX_ITEMS = 20
+_PROMPT_STASH_MAX_TEXT = 50_000
+_PROMPT_STASH_MAX_TOTAL_TEXT = 250_000
+
+
+def _prompt_stash_label(text: str) -> str:
+    """Return a compact plain-text label without changing the stored prompt."""
+    first_line = next((line.strip() for line in text.splitlines() if line.strip()), text.strip())
+    return " ".join(first_line.split())[:60]
+
+
+def _normalized_prompt_stash(value) -> list:
+    """Fail closed on malformed legacy entries while preserving list order."""
+    if not isinstance(value, list):
+        return []
+    normalized = []
+    seen_ids = set()
+    total_text = 0
+    for item in value:
+        if not isinstance(item, dict):
+            continue
+        item_id = str(item.get("id") or "").strip()
+        text = item.get("text")
+        if not item_id or item_id in seen_ids or not isinstance(text, str) or not text.strip():
+            continue
+        if len(text) > _PROMPT_STASH_MAX_TEXT:
+            continue
+        if len(normalized) >= _PROMPT_STASH_MAX_ITEMS:
+            break
+        if total_text + len(text) > _PROMPT_STASH_MAX_TOTAL_TEXT:
+            break
+        label = str(item.get("label") or "").strip() or _prompt_stash_label(text)
+        try:
+            created_at = float(item.get("created_at") or 0)
+        except (TypeError, ValueError):
+            created_at = 0.0
+        normalized.append({
+            "id": item_id,
+            "text": text,
+            "label": label[:60],
+            "created_at": created_at,
+        })
+        seen_ids.add(item_id)
+        total_text += len(text)
+    return normalized
+
+
+def _prompt_stash_merged_text(current_text: str, stashed_text: str) -> str:
+    if not current_text.strip():
+        return stashed_text
+    return f"{current_text.rstrip()}\n\n{stashed_text}"
+
+
 # In-process cache for the app-shell template. The `/`, `/index.html`, and
 # `/session/<id>` routes are the hottest navigations and each re-read the
 # ~190 KB static/index.html from disk and re-ran the two process-constant
@@ -12958,6 +13011,17 @@ def handle_get(handler, parsed) -> bool:
 
     if parsed.path == "/api/prompts":
         return j(handler, {"prompts": _load_saved_prompts()})
+
+    if parsed.path == "/api/session/prompt-stash":
+        query = parse_qs(parsed.query)
+        sid = query.get("session_id", [""])[0] if parsed.query else ""
+        if not sid:
+            return bad(handler, "session_id is required", 400)
+        try:
+            session = get_session(sid)
+        except KeyError:
+            return bad(handler, "Session not found", 404)
+        return j(handler, {"stash": _normalized_prompt_stash(getattr(session, "prompt_stash", []))})
 
     if parsed.path == "/api/session/export":
         return _handle_session_export(handler, parsed)
@@ -14457,6 +14521,68 @@ def handle_post(handler, parsed) -> bool:
             s.enabled_toolsets = toolsets
             s.save()
         return j(handler, {"ok": True, "enabled_toolsets": s.enabled_toolsets})
+
+    if parsed.path == "/api/session/prompt-stash":
+        sid = str(body.get("session_id") or "").strip()
+        action = str(body.get("action") or "stash").strip().lower()
+        if not sid:
+            return bad(handler, "session_id is required", 400)
+        if _session_is_subagent_view_only(sid):
+            return bad(handler, "Subagent sessions are view-only and cannot store a prompt stash from WebUI", 400)
+        try:
+            session = get_session(sid)
+        except KeyError:
+            return bad(handler, "Session not found", 404)
+        if bool(getattr(session, "read_only", False)):
+            return bad(handler, "Read-only sessions cannot store a prompt stash", 403)
+
+        with _get_session_agent_lock(sid):
+            stash = _normalized_prompt_stash(getattr(session, "prompt_stash", []))
+            draft = dict(getattr(session, "composer_draft", {}) or {})
+            if draft.get("files"):
+                return bad(handler, "Remove attachments before using the prompt stash", 409)
+
+            if action == "stash":
+                text = body.get("text")
+                if not isinstance(text, str) or not text.strip():
+                    return bad(handler, "text is required", 400)
+                if len(text) > _PROMPT_STASH_MAX_TEXT:
+                    return bad(handler, f"text too long (max {_PROMPT_STASH_MAX_TEXT} chars)", 400)
+                if len(stash) >= _PROMPT_STASH_MAX_ITEMS:
+                    return bad(handler, f"prompt stash limit reached (max {_PROMPT_STASH_MAX_ITEMS})", 400)
+                if sum(len(item["text"]) for item in stash) + len(text) > _PROMPT_STASH_MAX_TOTAL_TEXT:
+                    return bad(handler, f"prompt stash text limit reached (max {_PROMPT_STASH_MAX_TOTAL_TEXT} chars)", 400)
+                stash.append({
+                    "id": uuid.uuid4().hex[:12],
+                    "text": text,
+                    "label": _prompt_stash_label(text),
+                    "created_at": time.time(),
+                })
+                draft["text"] = ""
+            elif action == "restore":
+                item_id = str(body.get("id") or "").strip()
+                current_text = body.get("current_text")
+                if not item_id:
+                    return bad(handler, "id is required", 400)
+                if not isinstance(current_text, str):
+                    return bad(handler, "current_text must be a string", 400)
+                selected = next((item for item in stash if item["id"] == item_id), None)
+                if selected is None:
+                    return bad(handler, "Stashed prompt not found", 404)
+                restored_text = _prompt_stash_merged_text(current_text, selected["text"])
+                if len(restored_text) > _PROMPT_STASH_MAX_TEXT:
+                    return bad(handler, f"restored prompt too long (max {_PROMPT_STASH_MAX_TEXT} chars)", 400)
+                stash = [item for item in stash if item["id"] != item_id]
+                draft["text"] = restored_text
+            else:
+                return bad(handler, "invalid prompt stash action", 400)
+
+            session.prompt_stash = stash
+            session.composer_draft = draft
+            # Like composer drafts, stash changes are private compose state, not
+            # conversation activity. Avoid sidebar churn and active-chat reloads.
+            session.save(touch_updated_at=False, skip_index=True)
+        return j(handler, {"ok": True, "stash": stash, "draft": draft})
 
     if parsed.path == "/api/session/draft":
         # GET ?session_id=X  → return current draft
@@ -16431,6 +16557,31 @@ def handle_delete(handler, parsed) -> bool:
     if parsed.path.startswith("/api/toolset-presets/"):
         preset_id = parsed.path[len("/api/toolset-presets/"):]
         return _handle_toolset_preset_delete(handler, preset_id)
+    if parsed.path == "/api/session/prompt-stash":
+        sid = str(body.get("session_id") or "").strip()
+        item_id = str(body.get("id") or "").strip()
+        clear_all = body.get("all") is True
+        if not sid:
+            return bad(handler, "session_id is required", 400)
+        if not clear_all and not item_id:
+            return bad(handler, "id is required", 400)
+        if _session_is_subagent_view_only(sid):
+            return bad(handler, "Subagent sessions are view-only and cannot store a prompt stash from WebUI", 400)
+        try:
+            session = get_session(sid)
+        except KeyError:
+            return bad(handler, "Session not found", 404)
+        if bool(getattr(session, "read_only", False)):
+            return bad(handler, "Read-only sessions cannot store a prompt stash", 403)
+        with _get_session_agent_lock(sid):
+            stash = _normalized_prompt_stash(getattr(session, "prompt_stash", []))
+            next_stash = [] if clear_all else [item for item in stash if item["id"] != item_id]
+            if not clear_all and next_stash == stash:
+                return bad(handler, "Stashed prompt not found", 404)
+            if next_stash != stash:
+                session.prompt_stash = next_stash
+                session.save(touch_updated_at=False, skip_index=True)
+        return j(handler, {"ok": True, "stash": next_stash})
     if parsed.path == "/api/prompts":
         pid = str(body.get("id") or "").strip()
         if not pid:

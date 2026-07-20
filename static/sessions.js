@@ -350,6 +350,17 @@ function _rememberComposerDraftPayloadState(sid, text, files) {
   }
 }
 
+// Prompt-stash mutations move text and draft state atomically on the server.
+// Cancel the older keystroke debounce before accepting that response locally;
+// otherwise its delayed POST can put the just-stashed text back into the draft.
+function _acceptPromptStashComposerDraft(sid, text, files) {
+  if (!sid) return;
+  clearTimeout(_draftSaveTimer);
+  _draftSaveTimer = null;
+  _clearComposerDraftRestoreSuppression(sid);
+  _rememberComposerDraftPayloadState(sid, text, files);
+}
+
 // Immediate save used before session switches.
 function _saveComposerDraftNow(sid, text, files) {
   if (!sid) return Promise.resolve();

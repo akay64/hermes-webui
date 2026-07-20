@@ -1159,6 +1159,7 @@ class Session:
                  worktree_created_at=None,
                  enabled_toolsets=None,
                  composer_draft=None,
+                 prompt_stash=None,
                  anchor_activity_scenes=None,
                  process_wakeup_pause=None,
                  share_token=None,
@@ -1248,6 +1249,7 @@ class Session:
         self.read_only = bool(kwargs.get('read_only', False))
         self.enabled_toolsets = enabled_toolsets  # List[str] or None — per-session toolset override
         self.composer_draft = composer_draft if isinstance(composer_draft, dict) else {}
+        self.prompt_stash = prompt_stash if isinstance(prompt_stash, list) else []
         self.anchor_activity_scenes = anchor_activity_scenes if isinstance(anchor_activity_scenes, dict) else {}
         self.process_wakeup_pause = process_wakeup_pause if isinstance(process_wakeup_pause, dict) else {}
         self.share_token = str(share_token).strip() if share_token else None
@@ -1342,7 +1344,12 @@ class Session:
         meta['messages'] = self.messages
         meta['tool_calls'] = self.tool_calls
         meta['anchor_activity_scenes'] = self.anchor_activity_scenes if isinstance(self.anchor_activity_scenes, dict) else {}
-        # Fields not in METADATA_FIELDS (e.g. last_usage) go at the end. Exclude
+        # Fields not in METADATA_FIELDS (e.g. last_usage and prompt_stash) go at
+        # the end. prompt_stash is intentionally kept after messages: unlike the
+        # live composer draft, the sidebar metadata reader does not consume it,
+        # and putting a bounded 250 KB stash before messages would overflow the
+        # cheap 64 KB metadata-prefix read and force full session parses.
+        # Exclude
         # the keys we placed explicitly above so they aren't emitted twice.
         _placed = {'message_count', 'anchor_scene_index', 'messages', 'tool_calls', 'anchor_activity_scenes'}
         extra = {k: v for k, v in self.__dict__.items()
@@ -1704,6 +1711,7 @@ class Session:
             'read_only': self.read_only,
             'enabled_toolsets': self.enabled_toolsets,
             'composer_draft': self.composer_draft if isinstance(self.composer_draft, dict) else {},
+            'prompt_stash': self.prompt_stash if isinstance(self.prompt_stash, list) else [],
             'process_wakeup_pause': self.process_wakeup_pause if isinstance(self.process_wakeup_pause, dict) else {},
             'share_token': self.share_token,
             'share_created_at': self.share_created_at,
@@ -4141,6 +4149,9 @@ def _session_is_evictable(s) -> bool:
         composer_draft = getattr(s, 'composer_draft', None)
         if composer_draft:
             return False  # user is composing (draft present) → keep resident
+        prompt_stash = getattr(s, 'prompt_stash', None)
+        if prompt_stash:
+            return False  # user stashed work in this unsaved shell → keep resident
         if _session_sidecar_exists(sid) is not False:
             # Sidecar present or existence indeterminate → not a never-persisted
             # shell; do not enter the abandoned-shell grace path.

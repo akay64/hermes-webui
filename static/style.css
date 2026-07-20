@@ -5756,7 +5756,16 @@ main.main > #mainPlugin{display:none;}
 .session-project-dot{width:6px;height:6px;border-radius:50%;flex-shrink:0;display:inline-block;}
 
 /* ── Saved prompts popup ── */
-.saved-prompts-popup{position:absolute;bottom:calc(100% + 8px);left:0;min-width:280px;max-width:380px;max-height:320px;overflow-y:auto;background:var(--surface);border:1px solid var(--border);border-radius:10px;box-shadow:0 8px 24px rgba(0,0,0,.18);z-index:200;flex-direction:column;gap:2px;padding:6px;}
+.saved-prompts-popup{position:absolute;bottom:calc(100% + 8px);left:0;box-sizing:border-box;width:380px;height:320px;max-width:calc(100vw - 24px);max-height:calc(100dvh - 24px);overflow:hidden;background:var(--surface);border:1px solid var(--border);border-radius:10px;box-shadow:0 8px 24px rgba(0,0,0,.18);z-index:200;flex-direction:column;gap:2px;padding:6px;}
+.prompts-popup-tabs{display:flex;gap:3px;padding:2px;border-radius:7px;background:var(--hover-bg);}
+.prompts-popup-tab{flex:1;border:0;border-radius:5px;padding:6px 10px;background:transparent;color:var(--muted);font:inherit;font-size:12px;font-weight:600;cursor:pointer;}
+.prompts-popup-tab:hover{color:var(--text);}
+.prompts-popup-tab.active{background:var(--surface);color:var(--text);box-shadow:0 1px 3px rgba(0,0,0,.16);}
+.prompts-popup-body{flex:1 1 auto;min-height:0;overflow-y:auto;display:flex;flex-direction:column;gap:2px;}
+.prompt-stash-toolbar{display:flex;align-items:center;justify-content:space-between;gap:12px;padding:5px 8px 2px;color:var(--muted);font-size:11px;}
+.prompt-stash-clear{border:0;background:none;color:var(--muted);font:inherit;cursor:pointer;padding:2px 0;}
+.prompt-stash-clear:hover{color:var(--danger,#f56565);}
+.prompt-stash-row.working{opacity:.55;pointer-events:none;}
 .saved-prompt-row{display:flex;align-items:center;gap:6px;padding:8px 10px;border-radius:6px;cursor:pointer;font-size:13px;}
 .saved-prompt-row:hover{background:var(--hover-bg);}
 .saved-prompt-label{flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--text);}
