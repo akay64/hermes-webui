@@ -15411,6 +15411,10 @@ function renderMessages(options){
       _rehydrateDeferredWorklogsFromCache(inner);
       _wireMessageWindowLoadEarlierButton();
       if(typeof _applySessionNavigationPrefs==='function') _applySessionNavigationPrefs();
+      // Pending selected-context annotations are transient composer UI and are
+      // deliberately excluded from the session HTML cache. Re-project them once
+      // onto the restored transcript without observing or rerendering the DOM.
+      if(typeof _renderPendingSelectionAnnotations==='function') _renderPendingSelectionAnnotations(inner);
       _scrollAfterMessageRender(preserveScroll, scrollSnapshot);
       if(_maybeRecoverVirtualizedBlankViewport(options, preserveScroll, virtualWindow)) return;
       _updateMessageVirtualMeasurements(renderVisWithIdx, renderVisibleIdxs, virtualWindow);
@@ -16908,6 +16912,10 @@ function renderMessages(options){
       if(_sessionHtmlCache.size>8){_sessionHtmlCache.delete(_sessionHtmlCache.keys().next().value);}
     }
   }
+  // Apply transient selection highlights only after cache capture so bubbles
+  // never leak into another visit. The projection clears its own prior output,
+  // performs no layout reads, and never schedules another transcript render.
+  if(typeof _renderPendingSelectionAnnotations==='function') _renderPendingSelectionAnnotations(inner);
   _updateMessageVirtualMeasurements(renderVisWithIdx, renderVisibleIdxs, virtualWindow);
   // Kill the pinned/tail-follower mid-stream jitter. Schedule the re-anchor in a MICROTASK,
   // not synchronously: inside this render sync stack the browser still reports a transient
