@@ -45,8 +45,13 @@ def test_tray_source_contract_keeps_cards_unshrinkable_and_collapse_state_separa
     assert "context_blocks_expand: 'Expand selected contexts'" in I18N
     assert "context_blocks_collapse: 'Collapse selected contexts'" in I18N
     assert "context_blocks_clear_all: 'Clear all'" in I18N
+    assert "context_blocks_clear_title: 'Clear all selected contexts?'" in I18N
+    assert "context_blocks_clear_message: 'This will remove every selected context from your current prompt.'" in I18N
     assert "clearAll.className='composer-selection-clear'" in MESSAGES
-    assert "clearAll.addEventListener('click',()=>{" in MESSAGES
+    assert "clearAll.addEventListener('click',async()=>{" in MESSAGES
+    assert "const confirmed=await showConfirmDialog({" in MESSAGES
+    assert "focusCancel:true" in MESSAGES
+    assert "if(!confirmed)return;" in MESSAGES
     assert "_clearPendingSelections();" in MESSAGES
 
 
@@ -141,6 +146,10 @@ def test_live_tray_collapses_without_discarding_pending_contexts():
 
             page.locator("#msg").fill("Keep this draft")
             page.locator("#composerSelectionClear").click()
+            assert page.locator("#appDialogOverlay").is_visible()
+            assert page.locator("#appDialogTitle").inner_text() == "Clear all selected contexts?"
+            assert page.evaluate("document.activeElement && document.activeElement.id") == "appDialogCancel"
+            page.locator("#appDialogConfirm").click()
             assert page.locator("#composerSelectionChips").is_hidden()
             assert page.evaluate("window._hasPendingSelections()") is False
             assert page.locator("#msg").input_value() == "Keep this draft"

@@ -84,6 +84,8 @@ const LOCALES = {
     context_blocks_expand: 'Expand selected contexts',
     context_blocks_collapse: 'Collapse selected contexts',
     context_blocks_clear_all: 'Clear all',
+    context_blocks_clear_title: 'Clear all selected contexts?',
+    context_blocks_clear_message: 'This will remove every selected context from your current prompt.',
     context_annotations_label: 'Selected contexts',
 
     diff_loading: 'Loading diff',

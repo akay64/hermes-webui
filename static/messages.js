@@ -1539,7 +1539,15 @@ function _renderSelectionChips(){
   clearAll.className='composer-selection-clear';
   clearAll.textContent=_selectedTextReplyT('context_blocks_clear_all','Clear all');
   clearAll.setAttribute('aria-label',_selectedTextReplyT('context_blocks_clear_all','Clear all'));
-  clearAll.addEventListener('click',()=>{
+  clearAll.addEventListener('click',async()=>{
+    const confirmed=await showConfirmDialog({
+      title:_selectedTextReplyT('context_blocks_clear_title','Clear all selected contexts?'),
+      message:_selectedTextReplyT('context_blocks_clear_message','This will remove every selected context from your current prompt.'),
+      confirmLabel:_selectedTextReplyT('context_blocks_clear_all','Clear all'),
+      danger:true,
+      focusCancel:true,
+    });
+    if(!confirmed)return;
     _clearPendingSelections();
     const composer=(typeof $==='function'&&$('msg'))||document.getElementById('msg');
     if(composer&&typeof composer.focus==='function')composer.focus({preventScroll:true});
