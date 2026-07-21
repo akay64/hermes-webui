@@ -1589,7 +1589,7 @@ def switch_profile(name: str, *, process_wide: bool = True) -> dict:
     # profile — both of which still point to the OLD profile during process_wide=False
     # switches (the Set-Cookie has been sent but hasn't been processed by a new request
     # yet).  We derive workspace in priority order:
-    #   1. {home}/webui_state/last_workspace.txt  (previously chosen workspace for this profile)
+    #   1. The target profile's last_workspace.txt (previously chosen workspace)
     #   2. cfg terminal.cwd / workspace / default_workspace keys
     #   3. Boot-time DEFAULT_WORKSPACE constant
     # Use the module-level ``Path`` (imported at line 17) rather than re-importing
@@ -1597,8 +1597,16 @@ def switch_profile(name: str, *, process_wide: bool = True) -> dict:
     # if a future refactor moves the inner imports.
     default_workspace = None
     try:
-        from api.config import DEFAULT_WORKSPACE as _DW
-        lw_file = home / 'webui_state' / 'last_workspace.txt'
+        from api.config import DEFAULT_WORKSPACE as _DW, LAST_WORKSPACE_FILE as _GLOBAL_LW_FILE
+        # The default profile keeps WebUI state in HERMES_WEBUI_STATE_DIR
+        # (normally ~/.hermes/webui), while named profiles keep it below their
+        # profile home.  Using the named-profile layout for the root profile
+        # skips the user's saved choice and leaks the process boot default.
+        lw_file = (
+            _GLOBAL_LW_FILE
+            if _is_root_profile(name)
+            else home / 'webui_state' / 'last_workspace.txt'
+        )
         if lw_file.exists():
             _p = lw_file.read_text(encoding='utf-8').strip()
             if _p:

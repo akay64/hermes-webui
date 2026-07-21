@@ -124,6 +124,37 @@ def test_switch_profile_uses_last_workspace_txt_over_config(tmp_path, monkeypatc
         profiles._tls.profile = None
 
 
+def test_switching_back_to_default_uses_global_last_workspace_file(tmp_path, monkeypatch):
+    """The root profile stores its choice in STATE_DIR, not ~/.hermes/webui_state."""
+    import api.config as config
+    import api.profiles as profiles
+
+    default_home = tmp_path / ".hermes"
+    default_home.mkdir()
+    selected_workspace = tmp_path / "selected-home"
+    selected_workspace.mkdir()
+    stale_boot_workspace = tmp_path / "stale-test-workspace"
+    stale_boot_workspace.mkdir()
+
+    state_dir = tmp_path / "webui-state"
+    state_dir.mkdir()
+    last_workspace_file = state_dir / "last_workspace.txt"
+    last_workspace_file.write_text(str(selected_workspace), encoding="utf-8")
+
+    monkeypatch.setattr(profiles, "_DEFAULT_HERMES_HOME", default_home)
+    monkeypatch.setattr(config, "LAST_WORKSPACE_FILE", last_workspace_file)
+    monkeypatch.setattr(config, "DEFAULT_WORKSPACE", stale_boot_workspace)
+    monkeypatch.setattr(profiles, "_active_profile", "hermes-coder")
+    profiles._tls.profile = "hermes-coder"
+
+    try:
+        result = profiles.switch_profile("default", process_wide=False)
+    finally:
+        profiles._tls.profile = None
+
+    assert result["default_workspace"] == str(selected_workspace.resolve())
+
+
 def test_switch_profile_process_wide_false_returns_correct_model(tmp_path, monkeypatch):
     """
     switch_profile(process_wide=False) reads the default model from the TARGET
