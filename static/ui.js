@@ -8253,6 +8253,7 @@ async function handleComposerPrimaryAction(){
 function setBusy(v){
   S.busy=v;
   updateSendBtn();
+  if(typeof syncPlanModeToggle==='function') syncPlanModeToggle();
   if(!v){
     if(typeof _clearActivityElapsedTimer==='function') _clearActivityElapsedTimer();
     setStatus('');
@@ -10766,6 +10767,7 @@ function _topbarMessageMetaText(){
   return t('n_messages',loadedCount);
 }
 function syncTopbar(){
+  if(typeof syncPlanModeToggle==='function') syncPlanModeToggle();
   if(!S.session){
     document.title=assistantDisplayName();
     if(typeof syncWorkspaceDisplays==='function') syncWorkspaceDisplays();
