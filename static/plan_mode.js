@@ -4,12 +4,11 @@
   let savingSessionId = null;
 
   function _planModeSession() {
-    return global.S && global.S.session ? global.S.session : null;
+    return S.session;
   }
 
   function _planModeButton() {
-    if (typeof global.$ === 'function') return global.$('planModeToggle');
-    return global.document ? global.document.getElementById('planModeToggle') : null;
+    return $('planModeToggle');
   }
 
   function syncPlanModeToggle() {
@@ -18,7 +17,7 @@
 
     const session = _planModeSession();
     const enabled = !session || session.plan_mode !== false;
-    const busy = Boolean(global.S && (global.S.busy || global.S.activeStreamId));
+    const busy = Boolean(S.busy || S.activeStreamId);
     const saving = Boolean(session && savingSessionId === session.session_id);
 
     button.classList.toggle('active', enabled);
@@ -38,7 +37,7 @@
   async function togglePlanMode() {
     const session = _planModeSession();
     if (!session || !session.session_id) return;
-    if (savingSessionId || (global.S && (global.S.busy || global.S.activeStreamId))) return;
+    if (savingSessionId || S.busy || S.activeStreamId) return;
 
     const sid = session.session_id;
     const previous = session.plan_mode !== false;
@@ -48,7 +47,7 @@
     syncPlanModeToggle();
 
     try {
-      const data = await global.api('/api/session/update', {
+      const data = await api('/api/session/update', {
         method: 'POST',
         body: JSON.stringify({ session_id: sid, plan_mode: requested }),
       });
@@ -64,8 +63,8 @@
       if (current && current.session_id === sid && current.plan_mode === requested) {
         current.plan_mode = previous;
       }
-      if (typeof global.showToast === 'function') {
-        global.showToast('Failed to update Plan Mode: ' + (error && error.message ? error.message : error));
+      if (typeof showToast === 'function') {
+        showToast('Failed to update Plan Mode: ' + (error && error.message ? error.message : error));
       }
     } finally {
       if (savingSessionId === sid) savingSessionId = null;

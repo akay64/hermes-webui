@@ -159,27 +159,31 @@ const button = {
 };
 const calls = [];
 const toasts = [];
-let stateAtRequest = null;
-const context = {
-  S: {session: {session_id: 'session-1', plan_mode: false}, busy: false, activeStreamId: null},
-  $(id) { return id === 'planModeToggle' ? button : null; },
-  api: async (path, options) => {
-    stateAtRequest = context.S.session.plan_mode;
-    calls.push({path, options});
-    return {session: {plan_mode: false}};
-  },
-  showToast(message) { toasts.push(message); },
-  console,
-};
+const context = {button, calls, toasts, console};
 context.window = context;
 context.globalThis = context;
 vm.createContext(context);
+vm.runInContext(`
+  const S = {
+    session: {session_id: 'session-1', plan_mode: false},
+    busy: false,
+    activeStreamId: null,
+  };
+  const $ = id => id === 'planModeToggle' ? button : null;
+  let api = async (path, options) => {
+    calls.push({path, options});
+    return {session: {plan_mode: false}};
+  };
+  function showToast(message) { toasts.push(message); }
+`, context);
+assert.strictEqual(context.S, undefined);
 vm.runInContext(fs.readFileSync(process.argv[1], 'utf8'), context);
 
 (async () => {
   context.syncPlanModeToggle();
   assert.strictEqual(attributes['aria-pressed'], 'false');
   assert.strictEqual(classes.has('active'), false);
+  assert.strictEqual(button.disabled, false);
 
   await context.togglePlanMode();
   assert.strictEqual(calls.length, 1);
@@ -188,32 +192,35 @@ vm.runInContext(fs.readFileSync(process.argv[1], 'utf8'), context);
     session_id: 'session-1',
     plan_mode: true,
   });
-  assert.strictEqual(stateAtRequest, true);
-  assert.strictEqual(context.S.session.plan_mode, false);
+  assert.strictEqual(vm.runInContext('S.session.plan_mode', context), false);
   assert.strictEqual(attributes['aria-pressed'], 'false');
   assert.strictEqual(classes.has('active'), false);
   assert.strictEqual(button.disabled, false);
 
-  context.S.busy = true;
+  vm.runInContext('S.busy = true', context);
   context.syncPlanModeToggle();
   assert.strictEqual(button.disabled, true);
   await context.togglePlanMode();
   assert.strictEqual(calls.length, 1);
 
-  context.S.busy = false;
-  context.api = async () => { throw new Error('network'); };
+  vm.runInContext(`
+    S.busy = false;
+    api = async () => { throw new Error('network'); };
+  `, context);
   await context.togglePlanMode();
-  assert.strictEqual(context.S.session.plan_mode, false);
+  assert.strictEqual(vm.runInContext('S.session.plan_mode', context), false);
   assert.strictEqual(button.disabled, false);
   assert.deepStrictEqual(toasts, ['Failed to update Plan Mode: network']);
 
-  context.api = async () => {
-    context.S.session = {session_id: 'session-2', plan_mode: true};
-    return {session: {plan_mode: false}};
-  };
+  vm.runInContext(`
+    api = async () => {
+      S.session = {session_id: 'session-2', plan_mode: true};
+      return {session: {plan_mode: false}};
+    };
+  `, context);
   await context.togglePlanMode();
-  assert.strictEqual(context.S.session.session_id, 'session-2');
-  assert.strictEqual(context.S.session.plan_mode, true);
+  assert.strictEqual(vm.runInContext('S.session.session_id', context), 'session-2');
+  assert.strictEqual(vm.runInContext('S.session.plan_mode', context), true);
 })().catch(error => { console.error(error); process.exit(1); });
 """
     result = subprocess.run(
