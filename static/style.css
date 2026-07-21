@@ -2031,6 +2031,15 @@
   .yolo-pill:active{transform:translateY(0);}
   .yolo-pill-icon{font-size:12px;}
   .yolo-pill-label{font-size:10px;}
+  /* ── Session-scoped Plan Mode toggle ── */
+  .plan-mode-toggle{display:inline-flex;align-items:center;gap:4px;padding:3px 10px;border-radius:999px;font-size:11px;font-weight:700;letter-spacing:.04em;text-transform:uppercase;background:transparent;color:var(--muted);border:1px solid var(--border2);cursor:pointer;transition:all .15s;line-height:1.4;white-space:nowrap;}
+  .plan-mode-toggle:hover:not(:disabled){background:var(--hover-bg);color:var(--text);transform:translateY(-1px);}
+  .plan-mode-toggle:active:not(:disabled){transform:translateY(0);}
+  .plan-mode-toggle.active{background:rgba(56,137,253,.14);color:#3889fd;border-color:rgba(56,137,253,.4);}
+  .plan-mode-toggle.active:hover:not(:disabled){background:rgba(56,137,253,.22);border-color:rgba(56,137,253,.58);}
+  .plan-mode-toggle:disabled{cursor:default;opacity:.7;}
+  .plan-mode-toggle-icon{display:inline-flex;align-items:center;justify-content:center;}
+  .plan-mode-toggle-label{font-size:10px;}
   /* ── Queue flyout (same slide-up pattern as approval-card) ── */
   .queue-card{position:absolute;left:0;right:0;bottom:0;max-width:var(--msg-max);margin:0 auto;padding:0 20px;box-sizing:border-box;width:100%;overflow:hidden;pointer-events:none;z-index:2;}
   .queue-card.visible{pointer-events:auto;}
@@ -3021,6 +3030,8 @@
   .composer-footer.cf-icons .composer-model-chip{max-width:none;padding-left:10px;padding-right:8px;gap:4px;}
   .composer-footer.cf-icons #btnSavedPrompts,
   .composer-footer.cf-icons .saved-prompts-popup{display:none!important;}
+  .composer-footer.cf-icons .plan-mode-toggle{box-sizing:border-box;width:44px;height:44px;min-width:44px;padding:0;justify-content:center;}
+  .composer-footer.cf-icons .plan-mode-toggle-label{display:none;}
   .composer-footer.cf-icons .composer-divider{display:none;}
 
   .composer-footer.cf-burger .composer-left{gap:8px;}

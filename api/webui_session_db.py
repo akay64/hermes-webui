@@ -23,6 +23,7 @@ _METADATA_FIELDS = frozenset(
         "workspace",
         "model",
         "model_provider",
+        "plan_mode",
         "created_at",
         "updated_at",
         "pinned",

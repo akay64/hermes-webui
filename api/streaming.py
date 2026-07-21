@@ -6730,6 +6730,7 @@ def _run_agent_streaming(
     goal_related=False,
     moa_config=None,
     reasoning_effort=None,
+    plan_mode=False,
 ):
     """Run agent in background thread, writing SSE events to STREAMS[stream_id].
 
@@ -8259,6 +8260,7 @@ def _run_agent_streaming(
                 session_id=session_id,
                 session_db=_session_db,
                 prefill_messages=_prefill_messages,
+                plan_mode=bool(plan_mode),
                 stream_delta_callback=on_token,
                 reasoning_callback=on_reasoning,
                 tool_progress_callback=on_tool,
@@ -8329,6 +8331,7 @@ def _run_agent_streaming(
                     _fallback_resolved or {},
                     sorted(_toolsets) if _toolsets else [],
                     _reasoning_config or {},
+                    bool(plan_mode),
                     _main_request_overrides or {},
                     _public_prefill_context_status(_prefill_context),
                     # #1897: profile_home is part of the agent's identity because

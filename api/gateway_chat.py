@@ -641,6 +641,22 @@ def _cleanup_gateway_pending_mirror(session_id: str) -> None:
         logger.debug("Failed to reconcile gateway pending mirror during teardown", exc_info=True)
 
 
+def _apply_gateway_turn_options(
+    body,
+    *,
+    model_provider=None,
+    reasoning_effort=None,
+    plan_mode=False,
+):
+    """Apply session-scoped turn options to either gateway request shape."""
+    if model_provider:
+        body["provider"] = model_provider
+    if reasoning_effort is not None:
+        body["reasoning_effort"] = reasoning_effort
+    body["plan_mode"] = bool(plan_mode)
+    return body
+
+
 def _run_gateway_chat_streaming(
     session_id,
     msg_text,
@@ -651,6 +667,7 @@ def _run_gateway_chat_streaming(
     *,
     model_provider=None,
     goal_related=False,
+    plan_mode=False,
 ):
     """Bridge a WebUI chat turn through Hermes Gateway's API server.
 
@@ -783,10 +800,12 @@ def _run_gateway_chat_streaming(
         _use_runs_api = _gateway_use_runs_api_enabled(cfg) and gateway_supports_approval(base_url, api_key)
         if _use_runs_api:
             body_extras = {}
-            if model_provider:
-                body_extras["provider"] = model_provider
-            if reasoning_effort is not None:
-                body_extras["reasoning_effort"] = reasoning_effort
+            _apply_gateway_turn_options(
+                body_extras,
+                model_provider=model_provider,
+                reasoning_effort=reasoning_effort,
+                plan_mode=plan_mode,
+            )
             if _gw_overrides.get("service_tier"):
                 body_extras["service_tier"] = _gw_overrides["service_tier"]
             try:
@@ -867,10 +886,12 @@ def _run_gateway_chat_streaming(
                 "stream": True,
                 "messages": [*prefill_messages, {"role": "user", "content": message_content}],
             }
-            if model_provider:
-                body["provider"] = model_provider
-            if reasoning_effort is not None:
-                body["reasoning_effort"] = reasoning_effort
+            _apply_gateway_turn_options(
+                body,
+                model_provider=model_provider,
+                reasoning_effort=reasoning_effort,
+                plan_mode=plan_mode,
+            )
             if _gw_overrides.get("service_tier"):
                 body["service_tier"] = _gw_overrides["service_tier"]
             req = urllib.request.Request(

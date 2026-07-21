@@ -1046,6 +1046,7 @@ def _load_session_from_path(path: Path) -> "Session | None":
         data = json.loads(path.read_text(encoding='utf-8'))
     except Exception:
         return None
+    data.setdefault('plan_mode', False)
     data['messages'], _collapsed_partials = _collapse_adjacent_duplicate_partials(data.get('messages'))
     return Session(**data)
 
@@ -1117,7 +1118,7 @@ def model_explicit_pick_signature(model, model_provider) -> str:
 class Session:
     def __init__(self, session_id: str=None, title: str='Untitled',
                  workspace=str(DEFAULT_WORKSPACE), model=DEFAULT_MODEL,
-                 model_provider=None, reasoning_effort=None,
+                 model_provider=None, reasoning_effort=None, plan_mode: bool=True,
                  messages=None, created_at=None, updated_at=None,
                  tool_calls=None, pinned: bool=False, archived: bool=False,
                  project_id: str=None, profile=None,
@@ -1181,6 +1182,7 @@ class Session:
         # Restored from persisted metadata on load (arrives via **kwargs).
         self.model_explicit_pick_signature = kwargs.get('model_explicit_pick_signature') or None
         self.reasoning_effort = reasoning_effort  # None means "use config.yaml default"
+        self.plan_mode = plan_mode if isinstance(plan_mode, bool) else True
         self.messages = messages or []
         self.tool_calls = tool_calls or []
         self.created_at = created_at or time.time()
@@ -1301,7 +1303,7 @@ class Session:
         # without parsing the full messages array (which may be 400KB+).
         # Fields are listed in the order they should appear in the JSON file.
         METADATA_FIELDS = [
-            'session_id', 'title', 'workspace', 'model', 'model_provider', 'model_explicit_pick_signature', 'reasoning_effort', 'created_at', 'updated_at',
+            'session_id', 'title', 'workspace', 'model', 'model_provider', 'model_explicit_pick_signature', 'reasoning_effort', 'plan_mode', 'created_at', 'updated_at',
             'pinned', 'archived', 'project_id', 'profile',
             'input_tokens', 'output_tokens', 'estimated_cost',
             'cache_read_tokens', 'cache_write_tokens',
@@ -1475,6 +1477,7 @@ class Session:
         # during the parse (TOCTOU guard against an atomic replace mid-read).
         _pre_read_sig = _sidecar_stat_signature(p)
         data = json.loads(p.read_text(encoding='utf-8'))
+        data.setdefault('plan_mode', False)
         data['messages'], _collapsed_partials = _collapse_adjacent_duplicate_partials(data.get('messages'))
         session = cls(**data)
         if _collapsed_partials:
@@ -1534,6 +1537,7 @@ class Session:
                 return cls.load(sid)
             parsed['messages'] = []
             parsed['tool_calls'] = []
+            parsed.setdefault('plan_mode', False)
             session = cls(**parsed)
             sidecar_message_count = _parse_nonnegative_int(parsed.get('message_count'))
             index_message_count = None
@@ -1689,6 +1693,7 @@ class Session:
             # Only emit 'parent_session_id' when set (the /branch fork link, #1342).
             # Sessions without a fork must not leak None — see test_session_lineage_metadata_api.
             **({'parent_session_id': self.parent_session_id} if self.parent_session_id else {}),
+            'plan_mode': self.plan_mode,
             **({
                 'compression_recovery_source_session_id': self.compression_recovery_source_session_id,
                 'compression_recovery_action': self.compression_recovery_action,

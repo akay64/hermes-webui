@@ -14204,6 +14204,7 @@ def handle_post(handler, parsed) -> bool:
                     workspace=session.workspace,
                     model=session.model,
                     model_provider=session.model_provider,
+                    plan_mode=session.plan_mode,
                     messages=copy.deepcopy(session.messages),
                     tool_calls=copy.deepcopy(session.tool_calls),
                     # Reset ephemeral / per-session-instance flags. Duplicating an
@@ -14683,6 +14684,8 @@ def handle_post(handler, parsed) -> bool:
             require(body, "session_id")
         except ValueError as e:
             return bad(handler, str(e))
+        if "plan_mode" in body and not isinstance(body["plan_mode"], bool):
+            return bad(handler, "plan_mode must be a boolean", 400)
         try:
             s = _get_or_materialize_session(body["session_id"])
         except KeyError:
@@ -14722,6 +14725,8 @@ def handle_post(handler, parsed) -> bool:
                     _evict_session_agent(body["session_id"])
             if "reasoning_effort" in body:
                 s.reasoning_effort = body["reasoning_effort"] or None
+            if "plan_mode" in body:
+                s.plan_mode = body["plan_mode"]
             s.save()
         if str(old_ws or "") != str(new_ws or ""):
             try:
@@ -15132,6 +15137,7 @@ def handle_post(handler, parsed) -> bool:
                 workspace=source.workspace,
                 model=source.model,
                 model_provider=getattr(source, "model_provider", None),
+                plan_mode=getattr(source, "plan_mode", False),
                 profile=getattr(source, "profile", None),
                 title=branch_title,
                 messages=forked_messages,
@@ -21029,6 +21035,7 @@ def _start_chat_stream_for_session(
     model: str,
     model_provider=None,
     reasoning_effort=None,
+    plan_mode: bool = False,
     normalized_model: bool = False,
     diag=None,
     goal_related: bool = False,
@@ -21156,7 +21163,11 @@ def _start_chat_stream_for_session(
     diag.stage("worker_thread_start") if diag else None
     backend_is_gateway = webui_gateway_chat_enabled(get_config())
     worker_target = _run_gateway_chat_streaming if backend_is_gateway else _run_agent_streaming
-    worker_kwargs = {"model_provider": model_provider, "goal_related": goal_related}
+    worker_kwargs = {
+        "model_provider": model_provider,
+        "goal_related": goal_related,
+        "plan_mode": bool(plan_mode),
+    }
     if not backend_is_gateway:
         worker_kwargs["reasoning_effort"] = reasoning_effort
     if moa_config and not backend_is_gateway:
@@ -21267,6 +21278,7 @@ def _start_run(
     returns no adapter is surfaced as ``{"error": str(exc), "_status": 501}``
     so both call sites can map it onto their own HTTP shape.
     """
+    plan_mode = bool(getattr(s, "plan_mode", True))
     from api.runtime_adapter import (
         LegacyJournalRuntimeAdapter,
         StartRunRequest,
@@ -21285,6 +21297,7 @@ def _start_run(
                 model=request.model or model,
                 model_provider=request.provider or model_provider,
                 reasoning_effort=reasoning_effort,
+                plan_mode=plan_mode,
                 normalized_model=normalized_model,
                 diag=diag,
                 source=request.source or source,
@@ -21326,6 +21339,7 @@ def _start_run(
         model=model,
         model_provider=model_provider,
         reasoning_effort=reasoning_effort,
+        plan_mode=plan_mode,
         normalized_model=normalized_model,
         diag=diag,
         source=source,
