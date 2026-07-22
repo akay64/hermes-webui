@@ -9898,15 +9898,17 @@ async function refreshSession() {
   if (!S.session) return;
   try {
     // Reconnect/refresh is a recovery path, not an explicit history export.
-    // Keep it on the bounded session window so a long transcript cannot turn a
-    // transient network recovery into a full DOM/markdown rebuild.
+    // Preserve the loaded session window. The shared URL policy keeps ordinary
+    // truncated windows bounded, but omits msg_limit when a server clamp would
+    // otherwise replace the pane with fewer rows than are already loaded.
     const sid=S.session.session_id;
-    const refreshLimit=(typeof _messageReloadLimitForSession==='function'
+    const refreshLimit=typeof _messageReloadLimitForSession==='function'
       ? _messageReloadLimitForSession(sid)
-      : 30)||30;
-    const data = await api(
-      `/api/session?session_id=${encodeURIComponent(sid)}&messages=1&resolve_model=0&msg_limit=${encodeURIComponent(Math.max(30,Number(refreshLimit)||30))}&expand_renderable=1`
-    );
+      : 30;
+    const refreshUrl=typeof _sessionMessageReloadUrl==='function'
+      ? _sessionMessageReloadUrl(sid,refreshLimit)
+      : `/api/session?session_id=${encodeURIComponent(sid)}&messages=1&resolve_model=0`;
+    const data = await api(refreshUrl);
     S.session = data.session;
     S.messages = data.session.messages || [];
     _messagesTruncated = !!data.session._messages_truncated;
@@ -9915,9 +9917,10 @@ async function refreshSession() {
       throw new Error('Pending-session merge helper unavailable');
     }
     _mergePendingSessionMessage(data.session, S.messages);
-    S.activeStreamId = data.session.active_stream_id || null;
-
+    S.activeStreamId=data.session.active_stream_id||null;
+    S.session._modelResolutionDeferred=true;
     syncTopbar(); _renderMessagesWithScrollSnapshot();
+    if(typeof _resolveSessionModelForDisplaySoon==='function') _resolveSessionModelForDisplaySoon(sid);
     showToast('Conversation refreshed');
   } catch(e) { setStatus('Refresh failed: ' + e.message); }
 }
@@ -18817,11 +18820,11 @@ function autoResizeTextarea(ta) {
 async function submitEdit(msgIdx, newText) {
   if(!S.session || S.busy) return;
   const initialSid = S.session.session_id;
-  const loadedWindowOffset = Math.max(0, Number(_oldestIdx)||0);
-  const loadedWindowTruncated = !!(
+  const initialWindowOffset = Math.max(0, Number(_oldestIdx)||0);
+  const initialWindowTruncated = !!(
     typeof _messagesTruncated !== 'undefined' &&
     _messagesTruncated &&
-    loadedWindowOffset > 0
+    initialWindowOffset > 0
   );
   const absoluteKeepCount = _oldestIdx + msgIdx;
   // #5924: capture the deliberate-pick signal up front (pre-network), scoped to
@@ -18833,7 +18836,7 @@ async function submitEdit(msgIdx, newText) {
   // already contains everything needed to calculate the absolute keep_count.
   // Full history is still used for non-paginated/legacy states where the local
   // index cannot be safely translated into an absolute coordinate.
-  if(!loadedWindowTruncated&&typeof _ensureAllMessagesLoaded==='function'){
+  if(!initialWindowTruncated&&typeof _ensureAllMessagesLoaded==='function'){
     await _ensureAllMessagesLoaded();
   }
   if(!S.session || S.session.session_id !== initialSid) return;
@@ -18843,9 +18846,15 @@ async function submitEdit(msgIdx, newText) {
       keep_count: absoluteKeepCount
     })});
     if(!S.session || S.session.session_id !== initialSid) return;
+    const currentWindowOffset=Math.max(0,Number(_oldestIdx)||0);
+    const currentWindowTruncated=!!(
+      typeof _messagesTruncated!=='undefined'&&
+      _messagesTruncated&&
+      currentWindowOffset>0
+    );
     S.messages = S.messages.slice(
       0,
-      _loadedMessageSliceEndForKeepCount(absoluteKeepCount, loadedWindowOffset, loadedWindowTruncated)
+      _loadedMessageSliceEndForKeepCount(absoluteKeepCount,currentWindowOffset,currentWindowTruncated)
     );
     renderMessages();
     $('msg').value = newText;
@@ -18860,7 +18869,47 @@ async function submitEdit(msgIdx, newText) {
 
 async function regenerateResponse(btn) {
   if(!S.session || S.busy) return;
-  await cmdRetry();
+  const row = btn.closest('[data-msg-idx]');
+  if(!row) return;
+  const assistantIdx = parseInt(row.dataset.msgIdx, 10);
+  const initialWindowOffset = Math.max(0, Number(_oldestIdx)||0);
+  const initialWindowTruncated = !!(
+    typeof _messagesTruncated !== 'undefined' &&
+    _messagesTruncated &&
+    initialWindowOffset > 0
+  );
+  const absoluteKeepCount = _oldestIdx + assistantIdx;
+  const initialSid = S.session.session_id;
+  let lastUserText = '';
+  for(let i = assistantIdx - 1; i >= 0; i--) {
+    const m = S.messages[i];
+    if(m && m.role === 'user') { lastUserText = msgContent(m); break; }
+  }
+  if(!lastUserText) return;
+  if(!initialWindowTruncated&&typeof _ensureAllMessagesLoaded==='function'){
+    await _ensureAllMessagesLoaded();
+  }
+  if(!S.session || S.session.session_id !== initialSid) return;
+  try {
+    await api('/api/session/truncate', {method:'POST', body:JSON.stringify({
+      session_id: initialSid,
+      keep_count: absoluteKeepCount
+    })});
+    if(!S.session || S.session.session_id !== initialSid) return;
+    const currentWindowOffset=Math.max(0,Number(_oldestIdx)||0);
+    const currentWindowTruncated=!!(
+      typeof _messagesTruncated!=='undefined'&&
+      _messagesTruncated&&
+      currentWindowOffset>0
+    );
+    S.messages = S.messages.slice(
+      0,
+      _loadedMessageSliceEndForKeepCount(absoluteKeepCount,currentWindowOffset,currentWindowTruncated)
+    );
+    renderMessages();
+    $('msg').value = lastUserText;
+    await send();
+  } catch(e) { setStatus(t('regen_failed') + e.message); }
 }
 
 // postProcessRenderedMessages() runs one frame AFTER the render + JS scroll

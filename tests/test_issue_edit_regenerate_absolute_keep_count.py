@@ -1,6 +1,7 @@
 """Regression: edit/regenerate use absolute keep_count (#2184 pattern)."""
 
 import re
+import json
 import subprocess
 from pathlib import Path
 
@@ -32,28 +33,12 @@ def test_submit_edit_uses_absolute_keep_count():
     assert "keep_count: absoluteKeepCount" in body
 
 
-def test_regenerate_delegates_to_retry_instead_of_assistant_truncate():
+def test_regenerate_truncates_at_selected_assistant_and_resends():
     body = _function_body(UI_JS, "regenerateResponse")
-    assert "await cmdRetry()" in body
-    assert "/api/session/truncate" not in body
-    assert "await send()" not in body
-    assert "assistantIdx" not in body
-
-
-def test_regenerate_invokes_shared_retry_exactly_once():
-    body = _function_body(UI_JS, "regenerateResponse")
-    script = f"""
-const assert = require('assert');
-const S = {{session: {{session_id: 's1'}}, busy: false}};
-let retryCalls = 0;
-async function cmdRetry() {{ retryCalls += 1; }}
-{body}
-(async () => {{
-  await regenerateResponse({{}});
-  assert.strictEqual(retryCalls, 1);
-}})().catch(error => {{ console.error(error); process.exit(1); }});
-"""
-    subprocess.run(["node", "-e", script], check=True, capture_output=True, text=True)
+    assert re.search(r"absoluteKeepCount\s*=\s*_oldestIdx\s*\+\s*assistantIdx", body)
+    assert "keep_count: absoluteKeepCount" in body
+    assert "await send()" in body
+    assert "await cmdRetry()" not in body
 
 
 def test_submit_edit_captures_absolute_before_await():
@@ -66,13 +51,10 @@ def test_submit_edit_captures_absolute_before_await():
 
 def test_truncated_edit_and_regenerate_do_not_force_full_reload():
     """A visible paginated target can be truncated without loading all history."""
-    body = "".join(_function_body(UI_JS, "submitEdit").split())
-    assert "if(!loadedWindowTruncated&&typeof_ensureAllMessagesLoaded==='function')" in body
-    assert "_loadedMessageSliceEndForKeepCount(absoluteKeepCount,loadedWindowOffset,loadedWindowTruncated)" in body
-
-    regenerate = "".join(_function_body(UI_JS, "regenerateResponse").split())
-    assert "awaitcmdRetry();" in regenerate
-    assert "_ensureAllMessagesLoaded" not in regenerate
+    for name in ("submitEdit", "regenerateResponse"):
+        body = "".join(_function_body(UI_JS, name).split())
+        assert "if(!initialWindowTruncated&&typeof_ensureAllMessagesLoaded==='function')" in body
+        assert "_loadedMessageSliceEndForKeepCount(absoluteKeepCount,currentWindowOffset,currentWindowTruncated)" in body
 
 
 def test_loaded_window_slice_end_preserves_absolute_keep_count_semantics():
@@ -86,3 +68,63 @@ assert.strictEqual(_loadedMessageSliceEndForKeepCount(103, 0, false), 103);
 assert.strictEqual(_loadedMessageSliceEndForKeepCount(0, 70, true), 0);
 """
     subprocess.run(["node", "-e", script], check=True, capture_output=True, text=True)
+
+
+def _run_pagination_race(function_name: str) -> dict:
+    helper = _function_body(UI_JS, "_loadedMessageSliceEndForKeepCount")
+    mutation = _function_body(UI_JS, function_name)
+    invocation = (
+        "submitEdit(20, 'replacement')"
+        if function_name == "submitEdit"
+        else "regenerateResponse({closest:()=>({dataset:{msgIdx:'20'}})})"
+    )
+    script = f"""
+const makeMessages=(start,end)=>Array.from({{length:end-start}},(_,i)=>{{
+  const absolute=start+i;
+  return {{role:absolute%2===0?'assistant':'user',content:'abs-'+absolute}};
+}});
+const S={{session:{{session_id:'sid-race'}},busy:false,messages:makeMessages(70,100)}};
+let _oldestIdx=70;
+let _messagesTruncated=true;
+let resolveTruncate;
+const truncatePending=new Promise(resolve=>{{resolveTruncate=resolve;}});
+const calls=[];
+async function api(url,opts){{calls.push({{url,opts}});return truncatePending;}}
+function _ensureAllMessagesLoaded(){{throw new Error('truncated window must not full-load');}}
+function _deliberateSessionModelPick(){{return null;}}
+function _reArmRecoveryPick(){{}}
+function renderMessages(){{}}
+function msgContent(message){{return String(message&&message.content||'');}}
+function setStatus(message){{throw new Error(message);}}
+function send(){{return Promise.resolve();}}
+const input={{value:''}};
+function $(id){{return id==='msg'?input:null;}}
+{helper}
+{mutation}
+(async()=>{{
+  const pending={invocation};
+  await Promise.resolve();
+  S.messages=makeMessages(40,100);
+  _oldestIdx=40;
+  _messagesTruncated=true;
+  resolveTruncate({{ok:true}});
+  await pending;
+  process.stdout.write(JSON.stringify({{
+    keepCount:JSON.parse(calls[0].opts.body).keep_count,
+    rows:S.messages.map(message=>message.content),
+    input:input.value,
+  }}));
+}})().catch(error=>{{console.error(error.stack||error);process.exit(1);}});
+"""
+    completed = subprocess.run(
+        ["node", "-e", script], check=False, capture_output=True, text=True
+    )
+    assert completed.returncode == 0, completed.stderr
+    return json.loads(completed.stdout)
+
+
+def test_edit_and_regenerate_slice_from_current_window_after_truncate_await():
+    for function_name in ("submitEdit", "regenerateResponse"):
+        result = _run_pagination_race(function_name)
+        assert result["keepCount"] == 90
+        assert result["rows"] == [f"abs-{absolute}" for absolute in range(40, 90)]

@@ -24,6 +24,10 @@ let _loadingSessionId = null;
 // concurrent loads can still race and overwrite each other unless we compare
 // the generation token as well.
 let _loadSessionGeneration = 0;
+// Tracks user-visible load intent separately from request generations. A queued
+// same-session follow-up belongs to the intent that created its active load and
+// must not start after a newer cross-session navigation has taken ownership.
+let _sessionLoadIntentGeneration = 0;
 // The generation token protects shared state from stale continuations, while
 // this promise coordinates callers that target the same session. A caller that
 // arrives during an active same-session refresh must not continue on an already
@@ -49,11 +53,12 @@ function _sessionLoadCurrentMessageCount(sid) {
   return Number.isFinite(count)?count:null;
 }
 
-function _startSessionLoad(sid, opts) {
+function _startSessionLoad(sid, opts, intentGeneration) {
   const promise=_loadSessionOnce(sid, opts||{});
   const entry={
     sid,
     promise,
+    intentGeneration,
     followUpPromise:null,
     followUpOptions:null,
     followUpRequiresMutation:false,
@@ -70,6 +75,7 @@ function _startSessionLoad(sid, opts) {
 }
 
 function _runQueuedSessionLoad(sid, entry) {
+  if(entry.intentGeneration!==_sessionLoadIntentGeneration) return;
   if(typeof S==='undefined'||!S.session||S.session.session_id!==sid) return;
   if(!entry.followUpRequiresMutation){
     const minimum=entry.minimumMessageCount;
@@ -80,7 +86,7 @@ function _runQueuedSessionLoad(sid, entry) {
   if(Number.isFinite(entry.minimumMessageCount)){
     opts.minimumMessageCount=entry.minimumMessageCount;
   }
-  return _startSessionLoad(sid,opts);
+  return _startSessionLoad(sid,opts,entry.intentGeneration);
 }
 
 function _queueSessionLoadAfterActive(sid, opts, entry) {
@@ -128,7 +134,7 @@ function loadSession(sid) {
     }
     if(!forceReload&&currentSid===sid) return activeLoad.promise;
   }
-  return _startSessionLoad(sid,opts);
+  return _startSessionLoad(sid,opts,++_sessionLoadIntentGeneration);
 }
 
 // #3306: Snapshot of S.messages captured by loadSession() right before it
@@ -3239,16 +3245,29 @@ function _messageReloadLimitForSession(sid){
       );
     }
   }
-  // Recovery callers such as refreshSession() do not pass through the
-  // same-session force-reload path, so they have no captured hint. Preserve
-  // the currently displayed bounded window in that case instead of silently
-  // collapsing an expanded view back to the initial tail.
-  // Keep the policy in _settledSessionMessageWindowLimit so every bounded
-  // session fetch uses the same visible-row accounting.
-  const boundedLimit=typeof _settledSessionMessageWindowLimit==='function'
-    ? _settledSessionMessageWindowLimit(null,{forceBounded:true})
+  const loadedRenderableCount=_currentLoadedRenderableMessageCount();
+  const loadedMessageCount=Array.isArray(S.messages)?S.messages.length:0;
+  // An empty pane is an initial/cold load and should use the default tail.
+  if(loadedRenderableCount<=0&&loadedMessageCount<=0) return _INITIAL_MSG_LIMIT;
+  // A populated non-truncated pane is already complete. Recovery must omit
+  // msg_limit so replacing S.messages cannot collapse it to the default tail.
+  if(!_messagesTruncated) return null;
+  return _settledSessionMessageWindowLimit(null);
+}
+
+function _sessionMessageReloadUrl(sid, requestedLimit){
+  const base=`/api/session?session_id=${encodeURIComponent(sid)}&messages=1&resolve_model=0`;
+  const numericLimit=Number(requestedLimit);
+  const boundedLimit=Number.isFinite(numericLimit)&&numericLimit>0&&numericLimit<=_msgLimitMax
+    ? Math.floor(numericLimit)
     : null;
-  return boundedLimit===null ? _INITIAL_MSG_LIMIT : boundedLimit;
+  // A replace-oriented request above the server ceiling would be clamped and
+  // silently discard already-loaded older rows. Omitting msg_limit asks for the
+  // authoritative full transcript instead. The same omission also preserves a
+  // fully loaded, non-truncated pane instead of collapsing it to the default 30.
+  return boundedLimit===null
+    ? base
+    : `${base}&msg_limit=${encodeURIComponent(boundedLimit)}&expand_renderable=1`;
 }
 
 function _syncToolCallsForLoadedMessages(messages, sessionToolCalls){
@@ -3310,16 +3329,10 @@ async function _ensureMessagesLoaded(sid, opts) {
   // window exceeds the ceiling, fall back to the bare full-transcript request
   // (no msg_limit / no expand_renderable) so a same-session refresh never drops
   // already-loaded older rows (Codex gate #6154, silent row-loss).
-  const boundedReloadLimit = (reloadLimit && reloadLimit <= _msgLimitMax) ? reloadLimit : null;
-  const reloadLimitParam = boundedReloadLimit ? `&msg_limit=${boundedReloadLimit}` : '';
-  // Older frontends used expand_renderable=1 to request visible-row expansion.
-  // The server now counts msg_limit by visible transcript rows by default; keep
-  // the flag for compatibility with mixed-version deployments.
-  const expandParam = boundedReloadLimit ? '&expand_renderable=1' : '';
   let data;
   try {
     data = await api(
-      `/api/session?session_id=${encodeURIComponent(sid)}&messages=1&resolve_model=0${reloadLimitParam}${expandParam}`,
+      _sessionMessageReloadUrl(sid,reloadLimit),
       {timeoutMs:120000}
     );
   } finally {

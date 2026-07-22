@@ -17,9 +17,10 @@ NODE = shutil.which("node")
 pytestmark = pytest.mark.skipif(NODE is None, reason="node is required for settled-window runtime tests")
 
 
-def _node_driver(body: str) -> dict:
+def _node_driver(body: str, source_path: Path | None = None) -> dict:
+    assert NODE is not None
     result = subprocess.run(
-        [NODE, "-e", body, str(REPO / "static" / "sessions.js")],
+        [NODE, "-e", body, str(source_path or REPO / "static" / "sessions.js")],
         capture_output=True,
         text=True,
         encoding="utf-8",
@@ -41,7 +42,20 @@ function extractFunction(name) {
     if (start >= 0) break;
   }
   if (start < 0) throw new Error(`missing ${name}`);
-  const brace = src.indexOf('{', start);
+  const params = src.indexOf('(', start);
+  let paramDepth = 0;
+  let brace = -1;
+  for (let i = params; i < src.length; i += 1) {
+    if (src[i] === '(') paramDepth += 1;
+    else if (src[i] === ')') {
+      paramDepth -= 1;
+      if (paramDepth === 0) {
+        brace = src.indexOf('{', i + 1);
+        break;
+      }
+    }
+  }
+  if (brace < 0) throw new Error(`missing body for ${name}`);
   let depth = 0;
   for (let i = brace; i < src.length; i += 1) {
     if (src[i] === '{') depth += 1;
@@ -247,10 +261,388 @@ def test_done_and_recovery_paths_do_not_expand_the_render_window():
     done_start = MESSAGES_JS.index("source.addEventListener('done'")
     done_end = MESSAGES_JS.index("source.addEventListener('stream_end'", done_start)
     done_body = MESSAGES_JS[done_start:done_end]
-    assert done_body.index("const _settledDoneInflightSnapshot") < done_body.index("_clearOwnerInflightState()")
+    assert done_body.index("const _settledDoneInflightSnapshot") < done_body.index("_clearOwnerInflightState({deferSessionStreamResume:true})")
     refresh_idx = done_body.index("await _fetchSettledSessionMessageWindow")
-    ownership_idx = done_body.index("if(isActiveSession&&!_isSessionCurrentPane(activeSid)) isActiveSession=false;")
+    ownership_idx = done_body.index("const _settlementStillOwnsPane=")
+    assert "S.activeStreamId===streamId" in done_body[ownership_idx:]
+    assert "_settledLiveOwner.streamId===streamId" in done_body[ownership_idx:]
     assert refresh_idx < ownership_idx < done_body.index("S.session=_settledSession")
+
+
+def test_done_defers_session_stream_resume_until_after_async_settlement():
+    done_start = MESSAGES_JS.index("source.addEventListener('done'")
+    done_end = MESSAGES_JS.index("source.addEventListener('stream_end'", done_start)
+    done_body = MESSAGES_JS[done_start:done_end]
+    clear_idx = done_body.index("_clearOwnerInflightState({deferSessionStreamResume:true})")
+    fetch_idx = done_body.index("await _fetchSettledSessionMessageWindow")
+    idle_idx = done_body.index("_setActivePaneIdleIfOwner()")
+    resume_idx = done_body.rindex("_resumeSessionStreamAfterLiveChat(completedSid)")
+    assert clear_idx < fetch_idx < idle_idx < resume_idx
+    assert "finally" in done_body[idle_idx:resume_idx]
+
+
+def _done_continuation_stream_harness(
+    settlement_mode: str, *, replace_owner_while_pending: bool = False
+) -> dict:
+    assert settlement_mode in {"success", "rejection"}
+    return _node_driver(
+        _EXTRACT
+        + rf"""
+const path = require('path');
+const uiSrc = fs.readFileSync(path.join(path.dirname(process.argv[1]), 'ui.js'), 'utf8');
+function extractFrom(source, name) {{
+  const markers = [`async function ${{name}}(`, `function ${{name}}(`];
+  let start = -1;
+  for (const marker of markers) {{
+    start = source.indexOf(marker);
+    if (start >= 0) break;
+  }}
+  if (start < 0) throw new Error(`missing ${{name}}`);
+  const params = source.indexOf('(', start);
+  let paramDepth = 0;
+  let brace = -1;
+  for (let i = params; i < source.length; i += 1) {{
+    if (source[i] === '(') paramDepth += 1;
+    else if (source[i] === ')') {{
+      paramDepth -= 1;
+      if (paramDepth === 0) {{
+        brace = source.indexOf('{{', i + 1);
+        break;
+      }}
+    }}
+  }}
+  if (brace < 0) throw new Error(`missing body for ${{name}}`);
+  let depth = 0;
+  for (let i = brace; i < source.length; i += 1) {{
+    if (source[i] === '{{') depth += 1;
+    else if (source[i] === '}}') {{
+      depth -= 1;
+      if (depth === 0) return source.slice(start, i + 1);
+    }}
+  }}
+  throw new Error(`unterminated ${{name}}`);
+}}
+
+const parentSid = 'parent-session';
+const continuationSid = 'continuation-session';
+const streamId = 'stream-1';
+const replacementStreamId = 'stream-new';
+const replaceOwnerWhilePending = {json.dumps(replace_owner_while_pending)};
+const completedSid = replaceOwnerWhilePending ? parentSid : continuationSid;
+const fallbackMessages = [
+  {{role:'user', content:'bounded question'}},
+  {{role:'assistant', content:'bounded local answer', _live:true}},
+];
+const fallbackToolCalls = [{{id:'local-tool', name:'read_file', done:true}}];
+const settledMessages = [
+  {{role:'user', content:'settled question'}},
+  {{role:'assistant', content:'settled authoritative answer'}},
+];
+const settledToolCalls = [{{id:'settled-tool', name:'read_file', done:true}}];
+
+const storage = new Map([
+  ['hermes-webui-inflight', JSON.stringify({{sid:parentSid,streamId,ts:1}})],
+  ['hermes-webui-inflight-state', JSON.stringify({{[parentSid]:{{streamId}}}})],
+]);
+global.localStorage = {{
+  getItem:key=>storage.has(key)?storage.get(key):null,
+  setItem:(key,value)=>storage.set(key,String(value)),
+  removeItem:key=>storage.delete(key),
+}};
+global.location = {{href:'http://example.test/', pathname:'/', search:''}};
+global.history = {{replaceState:()=>{{}}}};
+global.document = {{
+  hidden:false,
+  visibilityState:'visible',
+  baseURI:'http://example.test/',
+  addEventListener:()=>{{}},
+  removeEventListener:()=>{{}},
+  querySelector:()=>null,
+  hasFocus:()=>true,
+}};
+global.window = global;
+window.location = global.location;
+window._compressionUi = null;
+window._streamJustFinished = false;
+
+const S = global.S = {{
+  session:{{session_id:parentSid,message_count:90,pending_started_at:1}},
+  messages:fallbackMessages.map(message=>({{...message}})),
+  toolCalls:fallbackToolCalls.map(tool=>({{...tool}})),
+  activeStreamId:streamId,
+  activeProfile:'default',
+  busy:true,
+  todos:[],
+}};
+const INFLIGHT = global.INFLIGHT = {{
+  [parentSid]:{{
+    messages:fallbackMessages.map(message=>({{...message}})),
+    toolCalls:fallbackToolCalls.map(tool=>({{...tool}})),
+    uploaded:[],
+  }},
+}};
+const LIVE_STREAMS = global.LIVE_STREAMS = {{}};
+const _STREAM_WAS_HIDDEN = global._STREAM_WAS_HIDDEN = {{}};
+const _STREAM_NOTIFICATION_BACKGROUND = global._STREAM_NOTIFICATION_BACKGROUND = {{}};
+const _desktopBackgroundedForNotifications = false;
+let _messagesTruncated = true;
+let _oldestIdx = 60;
+let _loadingSessionId = null;
+let _queueDrainSid = null;
+let _approvalSessionId = null;
+let _clarifySessionId = null;
+let _sessionEventSource = null;
+let _sessionStreamSessionId = null;
+let _sessionStreamReconnectTimer = null;
+let _sessionStreamHiddenSid = null;
+let _sessionStreamHiddenPollTimer = null;
+let _sessionStreamHiddenPollSid = null;
+let _sessionStreamHiddenPollFalseStreamId = null;
+let _sessionStreamHiddenPollFalseCount = 0;
+const _SESSION_STREAM_HIDDEN_POLL_MAX_FALSE = 3;
+const INFLIGHT_KEY = 'hermes-webui-inflight';
+const INFLIGHT_STATE_KEY = 'hermes-webui-inflight-state';
+
+class FakeEventSource {{
+  static instances = [];
+  static OPEN = 1;
+  static CONNECTING = 0;
+  static CLOSED = 2;
+  constructor(url) {{
+    this.url = String(url);
+    this.listeners = Object.create(null);
+    this.readyState = FakeEventSource.OPEN;
+    FakeEventSource.instances.push(this);
+  }}
+  addEventListener(name, fn) {{
+    (this.listeners[name] || (this.listeners[name] = [])).push(fn);
+  }}
+  emit(name, data) {{
+    for (const fn of this.listeners[name] || []) fn({{data:JSON.stringify(data),lastEventId:''}});
+  }}
+  close() {{ this.readyState = FakeEventSource.CLOSED; }}
+}}
+global.EventSource = FakeEventSource;
+
+const noops = [
+  '_resetStreamScrollFollow','ensureLiveWorklogShell','resetTurnWorkspaceMutations',
+  'snapshotLiveTurnHtmlForSession','_clearLiveRunStatusTimer','hideLiveRunStatus',
+  'saveInflightState','_setSessionViewedCount','_markSessionViewed','_markSessionCompletionUnread',
+  '_clearSessionCompletionUnread','_markSessionCompletedInList','_clearApprovalPendingForSession',
+  '_clearClarifyPendingForSession','stopApprovalPolling','hideApprovalCard','stopClarifyPolling',
+  'hideClarifyCard','finalizeThinkingCard','_cancelAnimationFramePendingStreamRender',
+  '_streamFadeCleanupReduceMotionListener','_smdEndParser','_flushReasoningToAnchor',
+  '_applyToAnchor','_scheduleAnchorRegistryCleanup','_clearAnchorProseIncrementalNode',
+  '_hydrateTodosFromSession','clearVisibleMessageRowCache','_setActiveSessionUrl',
+  '_attachProjectedAnchorSceneToLastAssistant','renderSessionArtifacts','clearLiveToolCards',
+  'removeThinking','syncTopbar','renderMessages','_followSettledDoneIfStillPinned',
+  'noteWorkspaceMutationsFromToolCalls','loadDir','renderSessionList','playNotificationSound',
+  'sendBrowserNotification','setComposerStatus','setStatus','setBusy','updateQueueBadge',
+  'trackBackgroundError','_stopHiddenActiveStreamPoll','_startHiddenActiveStreamPoll',
+];
+for (const name of noops) global[name] = ()=>{{}};
+global.$ = ()=>null;
+global.msgContent = message=>String(message&&message.content||'');
+global._isPreservedCompressionTaskListMarkerOnlyText = ()=>false;
+global._replaceMarkerOnlyAssistantWithStreamError = ()=>false;
+global._filterRecoveryControlMessages = messages=>messages;
+global._carryForwardEphemeralTurnFields = (_oldMessages,newMessages)=>newMessages;
+global._splitThinkFromContent = (content,reasoning)=>({{content,reasoning}});
+global._mergeSettledToolCallsWithLiveMetadata = calls=>calls;
+global._shouldUseLiveProseFade = ()=>false;
+global._isMessagePaneNearBottom = ()=>true;
+global._shouldFollowMessagesOnDomReplace = ()=>false;
+global._isDocumentVisibleAndFocused = ()=>true;
+global._completionNotificationPreviewText = ()=>'';
+global._shouldForceCompletionNotification = ()=>false;
+global._chatPayloadModelState = ()=>({{model:'model',model_provider:'provider'}});
+global._apiUrl = value=>value;
+global._readInflightStateMap = ()=>{{
+  try {{ return JSON.parse(localStorage.getItem(INFLIGHT_STATE_KEY)||'{{}}'); }}
+  catch (_) {{ return {{}}; }}
+}};
+global._isSessionCurrentPane = sid=>!!(sid&&S.session&&S.session.session_id===sid);
+global._isSessionActivelyViewed = sid=>global._isSessionCurrentPane(sid);
+global._clearStreamHidden = (sid,ownerStreamId)=>{{
+  const entry=_STREAM_WAS_HIDDEN[sid];
+  if(entry&&(!ownerStreamId||!entry.streamId||entry.streamId===ownerStreamId)) delete _STREAM_WAS_HIDDEN[sid];
+}};
+global._clearStreamNotificationBackground = (sid,ownerStreamId)=>{{
+  const entry=_STREAM_NOTIFICATION_BACKGROUND[sid];
+  if(entry&&(!ownerStreamId||!entry.streamId||entry.streamId===ownerStreamId)) delete _STREAM_NOTIFICATION_BACKGROUND[sid];
+}};
+global._bindStreamHiddenTracker = ()=>{{}};
+global._runJournalReplayParams = ()=>'';
+global._extractInlineThinkingFromContent = (content,reasoning)=>({{content:String(content||''),reasoning:String(reasoning||'')}});
+global._syncCtxIndicator = ()=>{{}};
+global._mergeUsageForCtxIndicator = (usage,fallback)=>({{...fallback,...usage}});
+
+let resolveSettlement;
+let rejectSettlement;
+let fetchCalls = [];
+const settlement = new Promise((resolve,reject)=>{{
+  resolveSettlement=resolve;
+  rejectSettlement=reject;
+}});
+global._fetchSettledSessionMessageWindow = (sid,session)=>{{
+  fetchCalls.push({{sid,sessionId:session&&session.session_id}});
+  return settlement;
+}};
+
+for (const name of ['clearInflightState','clearInflight']) eval(extractFrom(uiSrc,name));
+for (const name of [
+  'closeLiveStream','closeOtherLiveStreams','attachLiveStream',
+  '_chatStreamActiveForSession','_suspendSessionStreamForLiveChat',
+  '_resumeSessionStreamAfterLiveChat','stopSessionStream','startSessionStream',
+]) eval(extractFunction(name));
+
+const flush = () => new Promise(resolve=>setTimeout(resolve,0));
+const sessionSources = () => FakeEventSource.instances.filter(source=>source.url.includes('api/session/stream'));
+const chatSources = () => FakeEventSource.instances.filter(source=>source.url.includes('api/chat/stream'));
+
+(async()=>{{
+  attachLiveStream(parentSid,streamId);
+  await flush();
+  const parentSource=chatSources()[0];
+  if(!parentSource) throw new Error('production attachLiveStream did not create the parent chat EventSource');
+  parentSource.emit('done',{{
+    stream_id:streamId,
+    status:'completed',
+    session:{{
+      session_id:completedSid,
+      message_count:92,
+      messages:[{{role:'assistant',content:'terminal snapshot'}}],
+      tool_calls:[],
+      _messages_truncated:true,
+      _messages_offset:61,
+    }},
+  }});
+  await Promise.resolve();
+  await flush();
+  const pending={{
+    fetchCalls:fetchCalls.slice(),
+    sessionSources:sessionSources().map(source=>source.url),
+    sessionId:S.session&&S.session.session_id,
+    activeStreamId:S.activeStreamId,
+    parentInflightPresent:Object.prototype.hasOwnProperty.call(INFLIGHT,parentSid),
+  }};
+
+  if (replaceOwnerWhilePending) {{
+    S.messages=[{{role:'assistant',content:'new owner live transcript',_live:true}}];
+    S.toolCalls=[{{id:'new-owner-tool',name:'terminal',done:false}}];
+    S.activeStreamId=replacementStreamId;
+    S.busy=true;
+    attachLiveStream(parentSid,replacementStreamId);
+    await flush();
+  }}
+
+  if ({json.dumps(settlement_mode)} === 'success') {{
+    resolveSettlement({{
+      session_id:completedSid,
+      message_count:92,
+      messages:settledMessages.map(message=>({{...message}})),
+      tool_calls:settledToolCalls.map(tool=>({{...tool}})),
+      _messages_truncated:true,
+      _messages_offset:62,
+    }});
+  }} else {{
+    rejectSettlement(new Error('settled window unavailable'));
+  }}
+  await flush();
+  await flush();
+  const afterFirstResume=sessionSources().map(source=>source.url);
+  await flush();
+
+  console.log(JSON.stringify({{
+    mode:{json.dumps(settlement_mode)},
+    pending,
+    final:{{
+      sessionId:S.session&&S.session.session_id,
+      messages:S.messages,
+      toolCalls:S.toolCalls,
+      activeStreamId:S.activeStreamId,
+      parentInflightPresent:Object.prototype.hasOwnProperty.call(INFLIGHT,parentSid),
+      messagesTruncated:_messagesTruncated,
+      oldestIdx:_oldestIdx,
+      sessionSources:sessionSources().map(source=>source.url),
+      afterFirstResume,
+      sessionStreamSessionId:_sessionStreamSessionId,
+      sessionEventSourceUrl:_sessionEventSource&&_sessionEventSource.url,
+      chatSourceCount:chatSources().length,
+      liveStreamId:LIVE_STREAMS[parentSid]&&LIVE_STREAMS[parentSid].streamId,
+    }},
+  }}));
+}})().catch(error=>{{console.error(error.stack||error);process.exit(1);}});
+""",
+        REPO / "static" / "messages.js",
+    )
+
+
+@pytest.mark.parametrize("settlement_mode", ["success", "rejection"])
+def test_done_restarts_continuation_session_stream_after_settlement(settlement_mode):
+    outcome = _done_continuation_stream_harness(settlement_mode)
+
+    assert outcome["pending"] == {
+        "fetchCalls": [
+            {"sid": "continuation-session", "sessionId": "continuation-session"}
+        ],
+        "sessionSources": [],
+        "sessionId": "parent-session",
+        "activeStreamId": "stream-1",
+        "parentInflightPresent": False,
+    }
+
+    final = outcome["final"]
+    assert final["sessionId"] == "continuation-session"
+    assert final["activeStreamId"] is None
+    assert final["parentInflightPresent"] is False
+    assert final["messagesTruncated"] is True
+    assert final["sessionStreamSessionId"] == "continuation-session"
+    assert len(final["sessionSources"]) == 1
+    assert final["afterFirstResume"] == final["sessionSources"]
+    assert "session_id=continuation-session" in final["sessionSources"][0]
+    assert final["sessionEventSourceUrl"] == final["sessionSources"][0]
+    assert final["chatSourceCount"] == 1
+
+    if settlement_mode == "success":
+        assert [(message["role"], message["content"]) for message in final["messages"]] == [
+            ("user", "settled question"),
+            ("assistant", "settled authoritative answer"),
+        ]
+        assert final["toolCalls"] == [
+            {"id": "settled-tool", "name": "read_file", "done": True}
+        ]
+        assert final["oldestIdx"] == 62
+    else:
+        assert [(message["role"], message["content"]) for message in final["messages"]] == [
+            ("user", "bounded question"),
+            ("assistant", "bounded local answer"),
+        ]
+        assert final["messages"][1]["_live"] is True
+        assert final["toolCalls"] == [
+            {"id": "local-tool", "name": "read_file", "done": True}
+        ]
+        assert final["oldestIdx"] == 60
+
+
+@pytest.mark.parametrize("settlement_mode", ["success", "rejection"])
+def test_old_done_settlement_preserves_newer_same_session_stream_owner(settlement_mode):
+    outcome = _done_continuation_stream_harness(
+        settlement_mode, replace_owner_while_pending=True
+    )
+
+    final = outcome["final"]
+    assert final["sessionId"] == "parent-session"
+    assert final["activeStreamId"] == "stream-new"
+    assert final["liveStreamId"] == "stream-new"
+    assert final["chatSourceCount"] == 2
+    assert final["sessionSources"] == []
+    assert [(message["role"], message["content"]) for message in final["messages"]] == [
+        ("assistant", "new owner live transcript")
+    ]
+    assert final["toolCalls"] == [
+        {"id": "new-owner-tool", "name": "terminal", "done": False}
+    ]
 
 
 def test_settled_window_helpers_and_cross_module_callers_are_present():
@@ -264,5 +656,5 @@ def test_reconnect_refresh_uses_a_bounded_session_window():
     end = UI_JS.index("// ── Update banner", start)
     body = "".join(UI_JS[start:end].split())
     assert "_messageReloadLimitForSession(sid)" in body
-    assert "messages=1&resolve_model=0&msg_limit=${encodeURIComponent" in body
+    assert "_sessionMessageReloadUrl(sid,refreshLimit)" in body
     assert "api(`/api/session?session_id=${encodeURIComponent(S.session.session_id)}`)" not in body

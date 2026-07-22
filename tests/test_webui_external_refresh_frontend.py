@@ -55,6 +55,166 @@ def test_same_session_force_reload_does_not_restart_healthy_session_stream():
     assert "if(!sameSessionForceReload&&typeof stopSessionStream==='function') stopSessionStream();" in body
 
 
+def test_manual_refresh_never_replaces_a_loaded_window_with_a_smaller_clamped_tail():
+    """Full and above-ceiling panes must use an unbounded replacement request."""
+    functions = "\n\n".join(
+        _function_body(SESSIONS_JS, name)
+        for name in (
+            "_settledSessionMessageWindowLimit",
+            "_messageReloadLimitForSession",
+            "_sessionMessageReloadUrl",
+        )
+    )
+    refresh = _function_body(UI_JS, "refreshSession")
+    script = textwrap.dedent(
+        f"""
+        const _INITIAL_MSG_LIMIT=30;
+        const _MSG_LIMIT_MAX=500;
+        let _msgLimitMax=500;
+        let _sameSessionForceReloadHint=null;
+        let _messagesTruncated=false;
+        let _oldestIdx=0;
+        let loadedRenderable=0;
+        const S={{session:null,messages:[],activeStreamId:null}};
+        const calls=[];
+        const resolveCalls=[];
+        function _currentLoadedRenderableMessageCount(){{return loadedRenderable;}}
+        function dismissReconnect(){{}}
+        function getPendingSessionMessage(){{return null;}}
+        function syncTopbar(){{}}
+        function _renderMessagesWithScrollSnapshot(){{}}
+        function showToast(){{}}
+        function _resolveSessionModelForDisplaySoon(sid){{resolveCalls.push(sid);}}
+        function setStatus(message){{throw new Error(message);}}
+        const window={{_restartingForUpdate:false}};
+        const location={{reload(){{throw new Error('unexpected page reload');}}}};
+        async function api(url){{
+          calls.push(String(url));
+          const match=String(url).match(/[?&]msg_limit=(\\d+)/);
+          const requested=match?Number(match[1]):loadedRenderable;
+          const returned=match?Math.min(requested,_msgLimitMax):loadedRenderable;
+          return {{session:{{
+            session_id:S.session.session_id,
+            message_count:loadedRenderable,
+            messages:Array.from({{length:returned}},(_,i)=>({{role:'assistant',content:String(i)}})),
+            _messages_truncated:returned<loadedRenderable,
+            _messages_offset:loadedRenderable-returned,
+            _msg_limit_max:_msgLimitMax,
+          }}}};
+        }}
+        {functions}
+        {refresh}
+        async function runCase(count,truncated){{
+          loadedRenderable=count;
+          _messagesTruncated=truncated;
+          S.session={{session_id:'sid-'+count,message_count:count}};
+          S.messages=Array.from({{length:count}},(_,i)=>({{role:'assistant',content:String(i)}}));
+          await refreshSession();
+          return {{url:calls[calls.length-1],rows:S.messages.length,resolveSid:resolveCalls[resolveCalls.length-1]}};
+        }}
+        (async()=>{{
+          const full=await runCase(100,false);
+          const aboveCeiling=await runCase(600,true);
+          process.stdout.write(JSON.stringify({{full,aboveCeiling}}));
+        }})().catch(err=>{{console.error(err.stack||err);process.exit(1);}});
+        """
+    )
+    out = _run_node(script)
+    assert "msg_limit=" not in out["full"]["url"]
+    assert out["full"]["rows"] == 100
+    assert out["full"]["resolveSid"] == "sid-100"
+    assert "msg_limit=" not in out["aboveCeiling"]["url"]
+    assert out["aboveCeiling"]["rows"] == 600
+    assert out["aboveCeiling"]["resolveSid"] == "sid-600"
+
+
+def test_manual_refresh_defers_model_hydration_and_ignores_stale_resolution():
+    refresh = _function_body(UI_JS, "refreshSession")
+    resolver = _function_body(SESSIONS_JS, "_resolveSessionModelForDisplaySoon")
+    script = textwrap.dedent(
+        f"""
+        let _messagesTruncated=false;
+        let _oldestIdx=0;
+        const _MSG_LIMIT_MAX=500;
+        let _msgLimitMax=500;
+        const S={{session:null,messages:[],activeStreamId:null,lastUsage:null}};
+        const deferred=[];
+        const apiCalls=[];
+        let resolveHydration;
+        function _deferSessionSideEffect(sid,fn){{deferred.push({{sid,fn}});return Promise.resolve();}}
+        function _messageReloadLimitForSession(){{return 30;}}
+        function _sessionMessageReloadUrl(sid){{return `/api/session?session_id=${{sid}}&messages=1&resolve_model=0`;}}
+        function dismissReconnect(){{}}
+        function getPendingSessionMessage(){{return null;}}
+        function syncTopbar(){{}}
+        function _renderMessagesWithScrollSnapshot(){{}}
+        function showToast(){{}}
+        function setStatus(message){{throw new Error(message);}}
+        function _syncCtxIndicator(){{}}
+        const window={{_restartingForUpdate:false}};
+        const location={{reload(){{throw new Error('unexpected page reload');}}}};
+        async function api(url){{
+          apiCalls.push(String(url));
+          if(String(url).includes('resolve_model=0')) return {{session:{{
+            session_id:S.session.session_id,model:'fast-alias',model_provider:'alias-provider',
+            messages:[],_messages_truncated:false,_messages_offset:0,
+          }}}};
+          if(String(url).includes('resolve_model=1')){{
+            return new Promise(resolve=>{{resolveHydration=resolve;}});
+          }}
+          throw new Error('unexpected url '+url);
+        }}
+        {resolver}
+        {refresh}
+        (async()=>{{
+          S.session={{session_id:'sid-hydrate'}};
+          await refreshSession();
+          const aliasAfterRefresh=S.session.model;
+          const deferredBeforeHydration=S.session._modelResolutionDeferred;
+          const hydration=deferred.shift().fn();
+          resolveHydration({{session:{{
+            session_id:'sid-hydrate',model:'resolved-model',model_provider:'resolved-provider',
+            context_length:128000,threshold_tokens:100000,last_prompt_tokens:100,
+          }}}});
+          await hydration;
+          const hydrated={{
+            model:S.session.model,
+            provider:S.session.model_provider,
+            deferred:S.session._modelResolutionDeferred,
+          }};
+
+          S.session={{session_id:'sid-stale'}};
+          await refreshSession();
+          const staleHydration=deferred.shift().fn();
+          S.session={{session_id:'sid-newer',model:'newer-model',model_provider:'newer-provider'}};
+          resolveHydration({{session:{{
+            session_id:'sid-stale',model:'stale-resolved',model_provider:'stale-provider',
+          }}}});
+          await staleHydration;
+          process.stdout.write(JSON.stringify({{
+            aliasAfterRefresh,deferredBeforeHydration,hydrated,
+            final:{{sid:S.session.session_id,model:S.session.model,provider:S.session.model_provider}},
+            apiCalls,
+          }}));
+        }})().catch(error=>{{console.error(error.stack||error);process.exit(1);}});
+        """
+    )
+    out = _run_node(script)
+    assert out["aliasAfterRefresh"] == "fast-alias"
+    assert out["deferredBeforeHydration"] is True
+    assert out["hydrated"] == {
+        "model": "resolved-model",
+        "provider": "resolved-provider",
+        "deferred": False,
+    }
+    assert out["final"] == {
+        "sid": "sid-newer",
+        "model": "newer-model",
+        "provider": "newer-provider",
+    }
+    assert sum("resolve_model=1" in url for url in out["apiCalls"]) == 2
+
+
 def test_session_updated_recovery_does_not_hijack_an_inflight_navigation():
     """A stale session event must not restart the session being left."""
     # The per-session listener lives in messages.js; keep this assertion here
@@ -456,8 +616,9 @@ def test_same_session_force_reload_keeps_loaded_transcript_width_hint():
     # full-transcript path (#6152/#6154 ceiling; Codex gate silent row-loss fix).
     # #6177: the ceiling is now read from /api/session metadata into _msgLimitMax
     # (module-scope let, default _MSG_LIMIT_MAX) instead of the mirrored const.
-    assert "const boundedReloadLimit = (reloadLimit && reloadLimit <= _msgLimitMax) ? reloadLimit : null;" in SESSIONS_JS
-    assert "const reloadLimitParam = boundedReloadLimit ? `&msg_limit=${boundedReloadLimit}` : '';" in SESSIONS_JS
+    assert "function _sessionMessageReloadUrl(sid, requestedLimit)" in SESSIONS_JS
+    assert "numericLimit>0&&numericLimit<=_msgLimitMax" in SESSIONS_JS
+    assert "_sessionMessageReloadUrl(sid,reloadLimit)" in SESSIONS_JS
     assert "if (_ownsLoad()) _clearSameSessionForceReloadHint(sid);" in SESSIONS_JS
 
     load_start = SESSIONS_JS.index("async function _loadSessionOnce(sid)")
