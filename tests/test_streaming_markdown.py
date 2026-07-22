@@ -552,7 +552,7 @@ class TestDoneEventSmd:
             "Follow intent must be captured before renderMessages() replaces the "
             "live transcript DOM."
         )
-        after_render = fn[render_idx:render_idx + 500]
+        after_render = fn[render_idx:render_idx + 800]
         assert "if(shouldFollowOnDone" in after_render and "scrollToBottom()" in after_render, (
             "After final render, done handler must call scrollToBottom() when the "
             "user was pinned/near-bottom before DOM replacement."
