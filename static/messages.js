@@ -2827,12 +2827,15 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
     stopClarifyPolling();
     hideClarifyCard(true, reason||'terminal');
   }
-  function _clearOwnerInflightState(){
-    if(_isActiveSession() && S.activeStreamId!==streamId) return;
+  function _clearOwnerInflightState(options){
+    if(_isActiveSession() && S.activeStreamId!==streamId) return false;
     delete INFLIGHT[activeSid];
     clearInflightState(activeSid);
     _clearActivePaneInflightIfOwner();
-    _resumeSessionStreamAfterLiveChat(activeSid);
+    if(!(options&&options.deferSessionStreamResume)){
+      _resumeSessionStreamAfterLiveChat(activeSid);
+    }
+    return true;
   }
   function _isMarkerOnlyAssistantMessage(m){
     if(!m||m.role!=='assistant') return false;
@@ -6440,7 +6443,9 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
               : [],
           }
           : null;
-        _clearOwnerInflightState();
+        let _deferredOwnerSessionStreamResume=false;
+        try{
+        _deferredOwnerSessionStreamResume=_clearOwnerInflightState({deferSessionStreamResume:true});
         if(typeof _markSessionCompletedInList==='function'){
           _markSessionCompletedInList(completedSession, activeSid);
         }
@@ -6469,10 +6474,18 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
             }
           }
         }
-        // The bounded refresh awaits a second session request. Do not let a
-        // session switch during that await project the completed old stream
-        // into the newly selected pane.
-        if(isActiveSession&&!_isSessionCurrentPane(activeSid)) isActiveSession=false;
+        // The bounded refresh awaits a second session request. Pane identity
+        // alone is not enough here: a new chat stream can take ownership of the
+        // same session while the old stream is settling. Only the exact
+        // registered owner may install terminal state or clear activeStreamId.
+        if(isActiveSession){
+          const _settledLiveOwner=LIVE_STREAMS[activeSid];
+          const _settlementStillOwnsPane=
+            _isSessionCurrentPane(activeSid)&&
+            S.activeStreamId===streamId&&
+            !!(_settledLiveOwner&&_settledLiveOwner.streamId===streamId&&_settledLiveOwner.source===source);
+          if(!_settlementStillOwnsPane) isActiveSession=false;
+        }
         // The bounded window fetch above can take long enough for the reader
         // to scroll away from the tail. Re-evaluate follow intent only after
         // the await and pane-ownership check; a pre-fetch snapshot would yank
@@ -6703,6 +6716,11 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
           liveDisplayText:typeof _streamDisplay==='function'?_streamDisplay():assistantText,
         });
         sendBrowserNotification('Response complete',_completionPreview||'Task finished',{forceHidden:_wasEverBackgrounded,sid:activeSid});
+        }finally{
+          if(_deferredOwnerSessionStreamResume){
+            _resumeSessionStreamAfterLiveChat(completedSid);
+          }
+        }
       };
       if(_shouldUseLiveProseFade()&&assistantBody){
         _cancelAnimationFramePendingStreamRender();

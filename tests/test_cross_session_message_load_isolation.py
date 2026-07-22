@@ -91,6 +91,7 @@ def _extract_function(source: str, name: str) -> str:
 LOAD_SESSION_SRC = _extract_function(SESSIONS_SRC, "loadSession")
 LOAD_SESSION_ONCE_SRC = _extract_function(SESSIONS_SRC, "_loadSessionOnce")
 ENSURE_MESSAGES_LOADED_SRC = _extract_function(SESSIONS_SRC, "_ensureMessagesLoaded")
+SESSION_MESSAGE_RELOAD_URL_SRC = _extract_function(SESSIONS_SRC, "_sessionMessageReloadUrl")
 INFLIGHT_HAS_VISIBLE_STATE_SRC = _extract_function(SESSIONS_SRC, "_inflightHasVisibleLiveState")
 SELECT_LIVE_RECOVERY_INFLIGHT_SRC = _extract_function(SESSIONS_SRC, "_selectLiveRecoveryInflight")
 SESSION_UPDATED_HELPER_SRC = _extract_function(MESSAGES_SRC, "_queueSessionUpdatedRefresh")
@@ -237,6 +238,7 @@ function createEnvironment() {
   globalThis._activeSessionLoad = null;
   globalThis._loadingOlder = false;
   globalThis._loadSessionGeneration = 0;
+  globalThis._sessionLoadIntentGeneration = 0;
   globalThis._pendingCarryForwardSnapshot = null;
   globalThis._messagesTruncated = false;
   globalThis._oldestIdx = 0;
@@ -383,6 +385,7 @@ __SELECT_LIVE_RECOVERY_INFLIGHT_SRC__
 __LOAD_SESSION_COORDINATION_SRC__
 __LOAD_SESSION_SRC__
 __LOAD_SESSION_ONCE_SRC__
+__SESSION_MESSAGE_RELOAD_URL_SRC__
 __ENSURE_MESSAGES_LOADED_SRC__
 __SESSION_UPDATED_HELPER_SRC__
 
@@ -667,12 +670,66 @@ async function runSameSessionMutationRefreshQueue() {
   };
 }
 
+async function runQueuedMutationSupersededByNavigation() {
+  createEnvironment();
+  S.session = { session_id: 'sid-atlas', message_count: 21 };
+  const apiCalls = [];
+  let resolveAtlasMessages;
+  let resolveBeaconMeta;
+  const atlasMessagesPending = new Promise((resolve) => { resolveAtlasMessages = resolve; });
+  const beaconMetaPending = new Promise((resolve) => { resolveBeaconMeta = resolve; });
+  let atlasMetaCalls = 0;
+  globalThis.api = async (url) => {
+    const value = String(url);
+    apiCalls.push(value);
+    if (value === buildMessageUrl('sid-atlas', 0)) {
+      atlasMetaCalls += 1;
+      return atlasMetaCalls === 1 ? API_ATLAS_META : API_ATLAS_RELOAD_META;
+    }
+    if (value === buildMessageUrl('sid-atlas', 1)) {
+      return atlasMetaCalls === 1 ? atlasMessagesPending : API_ATLAS_RELOAD_MSGS;
+    }
+    if (value === buildMessageUrl('sid-beacon', 0)) return beaconMetaPending;
+    if (value === buildMessageUrl('sid-beacon', 1)) return API_BEACON_MSGS;
+    throw new Error('Unexpected API call: ' + value);
+  };
+
+  const active = loadSession('sid-atlas', {
+    force: true,
+    keepStaleUntilLoaded: true,
+    externalRefreshReason: 'external-refresh',
+  });
+  while (!apiCalls.includes(buildMessageUrl('sid-atlas', 1))) await Promise.resolve();
+
+  const queued = loadSession('sid-atlas', {
+    force: true,
+    keepStaleUntilLoaded: true,
+    externalRefreshReason: 'undo',
+  });
+  const navigation = loadSession('sid-beacon', { force: true });
+  while (!apiCalls.includes(buildMessageUrl('sid-beacon', 0))) await Promise.resolve();
+
+  resolveAtlasMessages(API_ATLAS_MSGS);
+  await active;
+  resolveBeaconMeta(API_BEACON_META);
+  await Promise.all([queued, navigation]);
+
+  return {
+    apiCalls,
+    atlasMetaCalls,
+    finalSid: S.session && S.session.session_id,
+    messages: snapshotState().messages,
+    loadingGeneration: snapshotState().loadingGeneration,
+  };
+}
+
 async function runAll() {
   return {
     crossSessionOrdering: await runCrossSessionOrdering(),
     observedIdleCrossSessionOrdering: await runObservedIdleCrossSessionOrdering(),
     staleIdleCatch: await runStaleRejectedIdleCatch(),
     sameSessionMutationQueue: await runSameSessionMutationRefreshQueue(),
+    queuedMutationVsNavigation: await runQueuedMutationSupersededByNavigation(),
   };
 }
 
@@ -751,6 +808,7 @@ def test_loadsession_cross_session_ordering_and_stale_reject_behavior():
         .replace("__LOAD_SESSION_COORDINATION_SRC__", LOAD_SESSION_COORDINATION_SRC)
         .replace("__LOAD_SESSION_SRC__", LOAD_SESSION_SRC)
         .replace("__LOAD_SESSION_ONCE_SRC__", LOAD_SESSION_ONCE_SRC)
+        .replace("__SESSION_MESSAGE_RELOAD_URL_SRC__", SESSION_MESSAGE_RELOAD_URL_SRC)
         .replace("__ENSURE_MESSAGES_LOADED_SRC__", ENSURE_MESSAGES_LOADED_SRC)
         .replace("__SESSION_UPDATED_HELPER_SRC__", SESSION_UPDATED_HELPER_SRC)
     )
@@ -760,6 +818,7 @@ def test_loadsession_cross_session_ordering_and_stale_reject_behavior():
     stale = body["staleIdleCatch"]
     observed = body["observedIdleCrossSessionOrdering"]
     mutation_queue = body["sameSessionMutationQueue"]
+    queued_vs_navigation = body["queuedMutationVsNavigation"]
 
     def _assert_atlas_wins(session_result, *, label):
         assert session_result["finalSid"] == "sid-atlas", f"{label}: stale overlap should end on Atlas session"
@@ -854,3 +913,9 @@ def test_loadsession_cross_session_ordering_and_stale_reject_behavior():
     ], "queued mutation refresh should run exactly one bounded follow-up load"
     assert mutation_queue["finalSid"] == "sid-atlas"
     assert mutation_queue["messages"] == ["after-mutation-transcript"]
+
+    assert queued_vs_navigation["atlasMetaCalls"] == 1, (
+        "a queued Atlas mutation refresh must be abandoned after newer Beacon navigation intent"
+    )
+    assert queued_vs_navigation["finalSid"] == "sid-beacon"
+    assert queued_vs_navigation["messages"] == ["stale-beacon-transcript"]
