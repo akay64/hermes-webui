@@ -25122,7 +25122,7 @@ def _handle_session_compress(handler, body):
 
         agent = None
         try:
-            agent = _run_agent.AIAgent(
+            agent = AIAgent(
                 model=resolved_model,
                 provider=resolved_provider,
                 base_url=resolved_base_url,
