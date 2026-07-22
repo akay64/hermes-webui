@@ -670,7 +670,11 @@ def test_each_config_writer_preserves_old_bytes_when_replace_fails(
         if writer == "main":
             from api import config
 
-            config._save_yaml_config_file(target, {"model": {"default": "new"}})
+            config._save_yaml_config_file(
+                target,
+                {"model": {"default": "new"}},
+                dirty_set={("model", "default")},
+            )
         elif writer == "onboarding":
             from api import onboarding
 
