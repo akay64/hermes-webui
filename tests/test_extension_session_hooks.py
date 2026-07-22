@@ -294,10 +294,42 @@ class TestHookRegistration:
 
 
 def test_canonical_sid_resolved_before_preload_notification():
-    body = _extract_block(SESSIONS_JS, "async function loadSession(sid)")
-    idx_resolve = body.index("_resolveSessionIdFromSidebarLineage")
+    canonical = _extract_block(SESSIONS_JS, "function _canonicalSessionLoadId(sid, opts)")
+    body = _extract_block(SESSIONS_JS, "function loadSession(sid)")
+    assert "_resolveSessionIdFromSidebarLineage" in canonical
+    idx_resolve = body.index("_canonicalSessionLoadId")
     idx_preload = body.index("_hermesNotifySessionOpen")
     assert idx_resolve < idx_preload
+
+
+def test_load_session_coordinator_honors_preload_veto_and_bridge_flag(tmp_path):
+    body = (
+        _extract_block(SESSIONS_JS, "function _canonicalSessionLoadId(sid, opts)")
+        + "\n"
+        + _extract_block(SESSIONS_JS, "function loadSession(sid)")
+        + textwrap.dedent("""
+            var S={session:null};
+            var _activeSessionLoad=null;
+            var starts=[];
+            var notifications=[];
+            function _resolveSessionIdFromSidebarLineage(sid){return sid==='alias'?'canonical':sid;}
+            function _hermesNotifySessionOpen(sid,data,opts){
+              notifications.push({sid:sid,preload:!!opts.preload});
+              return {cancel:true};
+            }
+            function _startSessionLoad(sid,opts){starts.push({sid:sid,opts:opts});return Promise.resolve(sid);}
+            function _sessionLoadNeedsFollowUp(){return false;}
+            function _queueSessionLoadAfterActive(){throw new Error('unexpected queue');}
+
+            loadSession('alias',{});
+            loadSession('alias',{_preloadNotified:true});
+            process.stdout.write(JSON.stringify({notifications:notifications,starts:starts}));
+        """)
+    )
+    data = json.loads(_run_in_tmp(tmp_path, body))
+    assert data["notifications"] == [{"sid": "canonical", "preload": True}]
+    assert len(data["starts"]) == 1
+    assert data["starts"][0]["sid"] == "canonical"
 
 
 def test_preload_veto_only_on_preload_phase():
@@ -305,11 +337,12 @@ def test_preload_veto_only_on_preload_phase():
     assert "opts.preload" in body
 
 
-def test_continuation_retry_carries_preload_notified_flag():
-    body = _extract_block(SESSIONS_JS, "async function loadSession(sid)")
+def test_continuation_retry_stays_inside_execution_core():
+    body = _extract_block(SESSIONS_JS, "async function _loadSessionOnce(sid)")
     idx_cont = body.index("continuationSid=")
     cont_branch = body[idx_cont:idx_cont + 400]
-    assert "_preloadNotified:true" in cont_branch
+    assert "return _loadSessionOnce(continuationSid" in cont_branch
+    assert "return loadSession(continuationSid" not in cont_branch
 
 
 def test_bridge_flag_passed_by_sidebar_open():
@@ -363,10 +396,10 @@ def test_no_early_closemobilesidebar_before_sidebar_open():
     )
 
 
-def test_cross_profile_retry_carries_preload_notified():
-    """Cross-profile retry must pass _preloadNotified:true so the pre-hook
-    doesn't re-fire after destructive side-effects already ran."""
-    body = _extract_block(SESSIONS_JS, "async function loadSession(sid)")
+def test_cross_profile_retry_stays_inside_execution_core():
+    """Cross-profile retry must not re-enter the preload coordinator."""
+    body = _extract_block(SESSIONS_JS, "async function _loadSessionOnce(sid)")
     idx_profile = body.index("skipProfileResolve:true")
-    profile_branch = body[idx_profile:idx_profile + 200]
-    assert "_preloadNotified:true" in profile_branch
+    profile_branch = body[max(0, idx_profile - 100):idx_profile + 200]
+    assert "return _loadSessionOnce(sid" in profile_branch
+    assert "return loadSession(sid" not in profile_branch

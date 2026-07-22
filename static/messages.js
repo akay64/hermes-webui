@@ -2183,12 +2183,15 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
     stopClarifyPolling();
     hideClarifyCard(true, reason||'terminal');
   }
-  function _clearOwnerInflightState(){
-    if(_isActiveSession() && S.activeStreamId!==streamId) return;
+  function _clearOwnerInflightState(options){
+    if(_isActiveSession() && S.activeStreamId!==streamId) return false;
     delete INFLIGHT[activeSid];
     clearInflightState(activeSid);
     _clearActivePaneInflightIfOwner();
-    _resumeSessionStreamAfterLiveChat(activeSid);
+    if(!(options&&options.deferSessionStreamResume)){
+      _resumeSessionStreamAfterLiveChat(activeSid);
+    }
+    return true;
   }
   function _isMarkerOnlyAssistantMessage(m){
     if(!m||m.role!=='assistant') return false;
@@ -5796,7 +5799,9 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
               : [],
           }
           : null;
-        _clearOwnerInflightState();
+        let _deferredOwnerSessionStreamResume=false;
+        try{
+        _deferredOwnerSessionStreamResume=_clearOwnerInflightState({deferSessionStreamResume:true});
         if(typeof _markSessionCompletedInList==='function'){
           _markSessionCompletedInList(completedSession, activeSid);
         }
@@ -6052,6 +6057,11 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
           liveDisplayText:typeof _streamDisplay==='function'?_streamDisplay():assistantText,
         });
         sendBrowserNotification('Response complete',_completionPreview||'Task finished',{forceHidden:_wasEverBackgrounded,sid:activeSid});
+        }finally{
+          if(_deferredOwnerSessionStreamResume){
+            _resumeSessionStreamAfterLiveChat(completedSid);
+          }
+        }
       };
       if(_shouldUseLiveProseFade()&&assistantBody){
         _cancelAnimationFramePendingStreamRender();

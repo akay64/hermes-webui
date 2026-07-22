@@ -55,6 +55,75 @@ def test_same_session_force_reload_does_not_restart_healthy_session_stream():
     assert "if(!sameSessionForceReload&&typeof stopSessionStream==='function') stopSessionStream();" in body
 
 
+def test_manual_refresh_never_replaces_a_loaded_window_with_a_smaller_clamped_tail():
+    """Full and above-ceiling panes must use an unbounded replacement request."""
+    functions = "\n\n".join(
+        _function_body(SESSIONS_JS, name)
+        for name in (
+            "_settledSessionMessageWindowLimit",
+            "_messageReloadLimitForSession",
+            "_sessionMessageReloadUrl",
+        )
+    )
+    refresh = _function_body(UI_JS, "refreshSession")
+    script = textwrap.dedent(
+        f"""
+        const _INITIAL_MSG_LIMIT=30;
+        const _MSG_LIMIT_MAX=500;
+        let _msgLimitMax=500;
+        let _sameSessionForceReloadHint=null;
+        let _messagesTruncated=false;
+        let _oldestIdx=0;
+        let loadedRenderable=0;
+        const S={{session:null,messages:[],activeStreamId:null}};
+        const calls=[];
+        function _currentLoadedRenderableMessageCount(){{return loadedRenderable;}}
+        function dismissReconnect(){{}}
+        function getPendingSessionMessage(){{return null;}}
+        function syncTopbar(){{}}
+        function _renderMessagesWithScrollSnapshot(){{}}
+        function showToast(){{}}
+        function setStatus(message){{throw new Error(message);}}
+        const window={{_restartingForUpdate:false}};
+        const location={{reload(){{throw new Error('unexpected page reload');}}}};
+        async function api(url){{
+          calls.push(String(url));
+          const match=String(url).match(/[?&]msg_limit=(\\d+)/);
+          const requested=match?Number(match[1]):loadedRenderable;
+          const returned=match?Math.min(requested,_msgLimitMax):loadedRenderable;
+          return {{session:{{
+            session_id:S.session.session_id,
+            message_count:loadedRenderable,
+            messages:Array.from({{length:returned}},(_,i)=>({{role:'assistant',content:String(i)}})),
+            _messages_truncated:returned<loadedRenderable,
+            _messages_offset:loadedRenderable-returned,
+            _msg_limit_max:_msgLimitMax,
+          }}}};
+        }}
+        {functions}
+        {refresh}
+        async function runCase(count,truncated){{
+          loadedRenderable=count;
+          _messagesTruncated=truncated;
+          S.session={{session_id:'sid-'+count,message_count:count}};
+          S.messages=Array.from({{length:count}},(_,i)=>({{role:'assistant',content:String(i)}}));
+          await refreshSession();
+          return {{url:calls[calls.length-1],rows:S.messages.length}};
+        }}
+        (async()=>{{
+          const full=await runCase(100,false);
+          const aboveCeiling=await runCase(600,true);
+          process.stdout.write(JSON.stringify({{full,aboveCeiling}}));
+        }})().catch(err=>{{console.error(err.stack||err);process.exit(1);}});
+        """
+    )
+    out = _run_node(script)
+    assert "msg_limit=" not in out["full"]["url"]
+    assert out["full"]["rows"] == 100
+    assert "msg_limit=" not in out["aboveCeiling"]["url"]
+    assert out["aboveCeiling"]["rows"] == 600
+
+
 def test_session_updated_recovery_does_not_hijack_an_inflight_navigation():
     """A stale session event must not restart the session being left."""
     # The per-session listener lives in messages.js; keep this assertion here
@@ -456,9 +525,9 @@ def test_same_session_force_reload_keeps_loaded_transcript_width_hint():
     # full-transcript path (#6152/#6154 ceiling; Codex gate silent row-loss fix).
     # #6177: the ceiling is now read from /api/session metadata into _msgLimitMax
     # (module-scope let, default _MSG_LIMIT_MAX) instead of the mirrored const.
-    assert "const boundedReloadLimit = (reloadLimit && reloadLimit <= _msgLimitMax) ? reloadLimit : null;" in SESSIONS_JS
-    assert "const reloadLimitParam = boundedReloadLimit ? `&msg_limit=${boundedReloadLimit}` : '';" in SESSIONS_JS
-    assert "if (_ownsLoad()) _clearSameSessionForceReloadHint(sid);" in SESSIONS_JS
+    assert "function _sessionMessageReloadUrl(sid, requestedLimit)" in SESSIONS_JS
+    assert "numericLimit>0&&numericLimit<=_msgLimitMax" in SESSIONS_JS
+    assert "return boundedLimit===null" in SESSIONS_JS
 
     load_start = SESSIONS_JS.index("async function _loadSessionOnce(sid)")
     load_end = SESSIONS_JS.index("// ── Handoff hint logic", load_start)

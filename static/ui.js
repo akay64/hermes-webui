@@ -9554,19 +9554,22 @@ async function refreshSession() {
   if (!S.session) return;
   try {
     // Reconnect/refresh is a recovery path, not an explicit history export.
-    // Keep it on the bounded session window so a long transcript cannot turn a
-    // transient network recovery into a full DOM/markdown rebuild.
+    // Preserve the loaded session window. The shared URL policy keeps ordinary
+    // truncated windows bounded, but omits msg_limit when a server clamp would
+    // otherwise replace the pane with fewer rows than are already loaded.
     const sid=S.session.session_id;
-    const refreshLimit=(typeof _messageReloadLimitForSession==='function'
+    const refreshLimit=typeof _messageReloadLimitForSession==='function'
       ? _messageReloadLimitForSession(sid)
-      : 30)||30;
-    const data = await api(
-      `/api/session?session_id=${encodeURIComponent(sid)}&messages=1&resolve_model=0&msg_limit=${encodeURIComponent(Math.max(30,Number(refreshLimit)||30))}&expand_renderable=1`
-    );
+      : 30;
+    const refreshUrl=typeof _sessionMessageReloadUrl==='function'
+      ? _sessionMessageReloadUrl(sid,refreshLimit)
+      : `/api/session?session_id=${encodeURIComponent(sid)}&messages=1&resolve_model=0`;
+    const data = await api(refreshUrl);
     S.session = data.session;
     S.messages = data.session.messages || [];
     _messagesTruncated = !!data.session._messages_truncated;
     _oldestIdx = data.session._messages_offset || 0;
+    if(typeof _msgLimitMax!=='undefined') _msgLimitMax=data.session._msg_limit_max||_MSG_LIMIT_MAX;
     const pendingMsg=getPendingSessionMessage(data.session,S.messages);
     if(pendingMsg) S.messages.push(pendingMsg);
     S.activeStreamId=data.session.active_stream_id||null;

@@ -3142,12 +3142,12 @@ function _settledSessionMessageWindowLimit(nextSession, options){
   if(typeof _messagesTruncated==='undefined'||(!_messagesTruncated&&!forceBounded)) return null;
   const loadedRenderableCount=_currentLoadedRenderableMessageCount();
   const loadedMessageCount=Array.isArray(S.messages)?S.messages.length:0;
-  // A recovery request can run before the normal paginated load has established
-  // _messagesTruncated. Do not let an already-full local transcript turn that
-  // recovery request back into a full server reload.
-  const loadedWindow=forceBounded&&!_messagesTruncated
-    ? 0
-    : Math.max(0,loadedRenderableCount);
+  // A populated non-truncated pane is already complete. Even force-bounded
+  // recovery must preserve that contract; requesting the default tail would
+  // replace the complete pane with 30 rows. An empty pre-load recovery may still
+  // reserve the normal initial window below.
+  if(!_messagesTruncated&&(loadedRenderableCount>0||loadedMessageCount>0)) return null;
+  const loadedWindow=Math.max(0,loadedRenderableCount);
   const priorMessageCount=Math.max(
     0,
     Number(S.session&&S.session.message_count)||loadedMessageCount
@@ -3166,10 +3166,24 @@ function _settledSessionMessageWindowLimit(nextSession, options){
   );
 }
 
-function _settledSessionMessageWindowUrl(sid, nextSession, options){
+function _sessionMessageReloadUrl(sid, requestedLimit){
   const base=`/api/session?session_id=${encodeURIComponent(sid)}&messages=1&resolve_model=0`;
+  const numericLimit=Number(requestedLimit);
+  const boundedLimit=Number.isFinite(numericLimit)&&numericLimit>0&&numericLimit<=_msgLimitMax
+    ? Math.floor(numericLimit)
+    : null;
+  // A replace-oriented request above the server ceiling would be clamped and
+  // silently discard already-loaded older rows. Omitting msg_limit asks for the
+  // authoritative full transcript instead. The same omission also preserves a
+  // fully loaded, non-truncated pane instead of collapsing it to the default 30.
+  return boundedLimit===null
+    ? base
+    : `${base}&msg_limit=${encodeURIComponent(boundedLimit)}&expand_renderable=1`;
+}
+
+function _settledSessionMessageWindowUrl(sid, nextSession, options){
   const limit=_settledSessionMessageWindowLimit(nextSession,options);
-  return limit===null?base:`${base}&msg_limit=${encodeURIComponent(limit)}`;
+  return _sessionMessageReloadUrl(sid,limit);
 }
 
 async function _fetchSettledSessionMessageWindow(sid, nextSession, options){
@@ -3226,16 +3240,14 @@ function _messageReloadLimitForSession(sid){
       );
     }
   }
-  // Recovery callers such as refreshSession() do not pass through the
-  // same-session force-reload path, so they have no captured hint. Preserve
-  // the currently displayed bounded window in that case instead of silently
-  // collapsing an expanded view back to the initial tail.
-  // Keep the policy in _settledSessionMessageWindowLimit so every bounded
-  // session fetch uses the same visible-row accounting.
-  const boundedLimit=typeof _settledSessionMessageWindowLimit==='function'
-    ? _settledSessionMessageWindowLimit(null,{forceBounded:true})
-    : null;
-  return boundedLimit===null ? _INITIAL_MSG_LIMIT : boundedLimit;
+  const loadedRenderableCount=_currentLoadedRenderableMessageCount();
+  const loadedMessageCount=Array.isArray(S.messages)?S.messages.length:0;
+  // An empty pane is an initial/cold load and should use the default tail.
+  if(loadedRenderableCount<=0&&loadedMessageCount<=0) return _INITIAL_MSG_LIMIT;
+  // A populated non-truncated pane is already complete. Recovery must omit
+  // msg_limit so replacing S.messages cannot collapse it to the default tail.
+  if(!_messagesTruncated) return null;
+  return _settledSessionMessageWindowLimit(null);
 }
 
 function _syncToolCallsForLoadedMessages(messages, sessionToolCalls){
@@ -3297,16 +3309,11 @@ async function _ensureMessagesLoaded(sid, opts) {
   // window exceeds the ceiling, fall back to the bare full-transcript request
   // (no msg_limit / no expand_renderable) so a same-session refresh never drops
   // already-loaded older rows (Codex gate #6154, silent row-loss).
-  const boundedReloadLimit = (reloadLimit && reloadLimit <= _msgLimitMax) ? reloadLimit : null;
-  const reloadLimitParam = boundedReloadLimit ? `&msg_limit=${boundedReloadLimit}` : '';
-  // Older frontends used expand_renderable=1 to request visible-row expansion.
-  // The server now counts msg_limit by visible transcript rows by default; keep
-  // the flag for compatibility with mixed-version deployments.
-  const expandParam = boundedReloadLimit ? '&expand_renderable=1' : '';
+  const reloadUrl=_sessionMessageReloadUrl(sid,reloadLimit);
   let data;
   try {
     data = await api(
-      `/api/session?session_id=${encodeURIComponent(sid)}&messages=1&resolve_model=0${reloadLimitParam}${expandParam}`,
+      reloadUrl,
       {timeoutMs:120000}
     );
   } finally {

@@ -103,6 +103,7 @@ LOAD_SESSION_COORDINATION_SRC = "\n\n".join(
         "_startSessionLoad",
         "_runQueuedSessionLoad",
         "_queueSessionLoadAfterActive",
+        "_sessionMessageReloadUrl",
     )
 )
 

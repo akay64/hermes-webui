@@ -361,6 +361,10 @@ let S = {{ session: {{ session_id: 'open', message_count: 0 }}, messages: [], la
 // Stubs for the incidental side effects _ensureMessagesLoaded touches.
 function _clearSameSessionForceReloadHint() {{}}
 function _messageReloadLimitForSession() {{ return 0; }}
+function _sessionMessageReloadUrl(sid, limit) {{
+  const base=`/api/session?session_id=${{encodeURIComponent(sid)}}&messages=1&resolve_model=0`;
+  return limit>0?`${{base}}&msg_limit=${{limit}}&expand_renderable=1`:base;
+}}
 function _syncToolCallsForLoadedMessages() {{}}
 function clearLiveToolCards() {{}}
 

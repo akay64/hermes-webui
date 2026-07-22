@@ -281,20 +281,23 @@ the correct display payload: a session may already be loaded through the paginat
 `/api/session?msg_limit=...` contract, especially when transcript virtualization is
 disabled.
 
-When the browser's current session is truncated, `sessions.js` requests a bounded
+When the browser's current session is truncated, `sessions.js` requests its loaded
 settled window from the same `/api/session` endpoint before applying the terminal
-snapshot. The server remains authoritative for visible-row counting, tool-result
-carry-through, `_messages_offset`, and activity-scene hydration. `messages.js` merges
-that bounded window with the terminal metadata and preserves the existing pagination
-cursor. SSE recovery uses the same path.
+snapshot. Windows within the server-advertised `msg_limit` ceiling stay bounded. A
+larger loaded window omits `msg_limit` and fetches the authoritative transcript rather
+than accepting a clamped response that would discard older loaded rows. The server
+remains authoritative for visible-row counting, tool-result carry-through,
+`_messages_offset`, and activity-scene hydration. `messages.js` merges that replacement
+window with the terminal metadata and preserves the existing pagination cursor. SSE
+recovery uses the same path.
 
 The terminal paths do not promote `_messageRenderWindowSize` to the full transcript.
 Explicit history actions such as loading older messages, session-start navigation,
 and export may still request or render the full session. Edit/regenerate targets
 already visible in a paginated window keep the server-facing absolute `keep_count`
 but slice only the loaded local window; they do not expand the transcript merely to
-submit the mutation. Reconnect/refresh recovery also requests a bounded window. If a
-bounded refresh fails, the browser keeps its bounded in-flight/local transcript
+submit the mutation. Reconnect/refresh recovery also preserves the loaded window
+width. If a refresh fails, the browser keeps its bounded in-flight/local transcript
 rather than replacing it with the full SSE payload. This keeps the visible transcript
 and pagination state coherent without changing the experimental virtualization
 preference or the Agent repository.
