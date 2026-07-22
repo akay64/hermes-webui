@@ -2404,6 +2404,10 @@ document.addEventListener('keydown',async e=>{
     }
   }
 });
+let _shiftKeyDown=false;
+document.addEventListener('keydown',e=>{if(e.key==='Shift')_shiftKeyDown=true;});
+document.addEventListener('keyup',e=>{if(e.key==='Shift')_shiftKeyDown=false;});
+window.addEventListener('blur',()=>{_shiftKeyDown=false;});
 const LARGE_TEXT_PASTE_CHAR_THRESHOLD=4000;
 const LARGE_TEXT_PASTE_LINE_THRESHOLD=100;
 function _largeTextPasteLineCount(text){
@@ -2461,6 +2465,7 @@ $('msg').addEventListener('paste',e=>{
     return;
   }
   const plainText=e.clipboardData?.getData('text/plain')||'';
+  if(_shiftKeyDown)return;
   if(!_shouldAttachLargePastedText(plainText))return;
   const pastedTextFile=_largeTextPasteFile(plainText);
   if(!_largeTextPasteFitsUploadLimit(pastedTextFile))return;
