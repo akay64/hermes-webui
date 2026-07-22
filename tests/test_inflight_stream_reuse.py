@@ -1165,7 +1165,7 @@ assert.strictEqual(inflight.lastRunJournalEventId, 'run-a:7');
     result = subprocess.run([NODE, "-e", script], capture_output=True, text=True, check=False)
     assert result.returncode == 0, result.stderr
 
-    load_body = _function_body(SESSIONS_JS, "loadSession")
+    load_body = _function_body(SESSIONS_JS, "_loadSessionOnce")
     attach_body = _function_body(MESSAGES_JS, "attachLiveStream")
     close_body = _function_body(MESSAGES_JS, "closeLiveStream")
     compact_body = _function_body(UI_JS, "_compactInflightState")

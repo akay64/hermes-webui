@@ -440,12 +440,11 @@ class TestMessagePaginationFrontend:
         fn_end = SESSIONS_JS.find("\n}", fn_start) + 2
         fn_body = SESSIONS_JS[fn_start:fn_end]
 
-        assert "msg_limit=" in fn_body, (
-            "_ensureMessagesLoaded should include msg_limit parameter in the API call"
-        )
-        assert "_INITIAL_MSG_LIMIT" in fn_body, (
-            "_ensureMessagesLoaded should use _INITIAL_MSG_LIMIT constant"
-        )
+        assert "_messageReloadLimitForSession(sid)" in fn_body
+        assert "_sessionMessageReloadUrl(sid,reloadLimit)" in fn_body
+        url_start = SESSIONS_JS.index("function _sessionMessageReloadUrl")
+        url_end = SESSIONS_JS.index("\n}", url_start) + 2
+        assert "msg_limit=" in SESSIONS_JS[url_start:url_end]
 
     def test_truncation_tracking(self):
         """_messagesTruncated must be set from the server response."""
