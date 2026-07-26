@@ -14931,9 +14931,11 @@ def handle_post(handler, parsed) -> bool:
                 for (n, t), prev in zip(_draft_stages[1:], _draft_stages[:-1], strict=True)
             )
             handler._safe_webui_print(
-                "[SLOW] /api/session/draft total=%.1fms stages: %s" % (
+                "[SLOW] /api/session/draft total=%.1fms stages: %s  [" "threads=%d" "]"
+                % (
                     (_draft_stages[-1][1] - _draft_t0) * 1000,
                     parts,
+                    threading.active_count(),
                 )
             )
         return True
@@ -24859,24 +24861,31 @@ def _handle_session_compress(handler, body):
 
             agent._compression_before_db_commit = _compression_before_db_commit
 
-            with _cfg._get_session_agent_lock(sid):
-                # Re-read the session while holding the lock. If the history
-                # changed since the request was accepted, the summary is stale
-                # and must not be committed to state.db or the sidecar.
-                s = get_session(sid)
-                try:
-                    _assert_session_unchanged()
-                except RuntimeError as exc:
-                    return bad(handler, str(exc), 409)
+            _compr_t0 = time.monotonic()
+            print(
+                "[compr] Compression starting for session %s..."
+                % sid,
+                flush=True,
+            )
+            try:
+                with _cfg._get_session_agent_lock(sid):
+                    # Re-read the session while holding the lock. If the history
+                    # changed since the request was accepted, the summary is stale
+                    # and must not be committed to state.db or the sidecar.
+                    s = get_session(sid)
+                    try:
+                        _assert_session_unchanged()
+                    except RuntimeError as exc:
+                        return bad(handler, str(exc), 409)
 
-                # Ensure the WebUI session has a durable row before asking the
-                # agent to archive it. Existing sessions created before the
-                # WebUI SessionDB bridge may have no active rows; seed those
-                # once from the sidecar, but never seed over archived history.
-                agent._ensure_db_session()
-                if not getattr(agent, "_session_db_created", False):
-                    return bad(handler, "Session database unavailable; compression was not applied.", 503)
-                active_db_messages = session_db.get_messages(sid)
+                    # Ensure the WebUI session has a durable row before asking the
+                    # agent to archive it. Existing sessions created before the
+                    # WebUI SessionDB bridge may have no active rows; seed those
+                    # once from the sidecar, but never seed over archived history.
+                    agent._ensure_db_session()
+                    if not getattr(agent, "_session_db_created", False):
+                        return bad(handler, "Session database unavailable; compression was not applied.", 503)
+                    active_db_messages = session_db.get_messages(sid)
                 if not active_db_messages:
                     if session_db.has_archived_messages(sid):
                         return bad(
@@ -24956,6 +24965,17 @@ def _handle_session_compress(handler, body):
                     s.path.with_suffix(".json.bak").unlink(missing_ok=True)
                 except OSError:
                     pass
+            finally:
+                _compr_dur = time.monotonic() - _compr_t0
+                print(
+                    "[compr] Compression %s for session %s in %.1fs"
+                    % (
+                        "completed" if getattr(s, "compression_anchor_mode", None) == "manual" else "aborted",
+                        sid,
+                        _compr_dur,
+                    ),
+                    flush=True,
+                )
         finally:
             try:
                 session_db.close()
