@@ -21846,6 +21846,50 @@ def _refresh_process_wakeup_pause_credential_fingerprint(session) -> bool:
     return True
 
 
+def _resolve_process_wakeup_session_model_state(session):
+    """Resolve a wakeup model without repairing a deliberate session pick.
+
+    The available-model catalog is process-global and can be refreshed while a
+    delegated child runs on another provider/model. A wakeup must not treat a
+    transient child-shaped catalog as evidence that the parent's persisted,
+    explicitly selected model is stale. The explicit-pick signature is durable
+    user intent; when it still matches the current pair, use that pair directly.
+    """
+    requested_model = getattr(session, "model", None)
+    requested_provider = getattr(session, "model_provider", None)
+    try:
+        from api.models import model_explicit_pick_signature
+
+        picked_signature = str(
+            getattr(session, "model_explicit_pick_signature", None) or ""
+        )
+        current_signature = model_explicit_pick_signature(
+            requested_model,
+            requested_provider,
+        )
+        if requested_model and picked_signature and picked_signature == current_signature:
+            return requested_model, requested_provider, False
+    except Exception:
+        logger.debug(
+            "failed to verify explicit model pick for process wakeup session %s",
+            getattr(session, "session_id", None),
+            exc_info=True,
+        )
+
+    _pp_provider, _pp_default, _pp_cfg = _read_profile_model_config(
+        session,
+        requested_provider,
+    )
+    return _resolve_compatible_session_model_state(
+        requested_model,
+        requested_provider,
+        profile_provider=_pp_provider,
+        profile_default_model=_pp_default,
+        profile_config=_pp_cfg,
+        prefer_cached_catalog=True,
+    )
+
+
 def start_session_turn(
     session_id: str,
     message: str,
@@ -21903,24 +21947,7 @@ def start_session_turn(
     except ValueError as e:
         return {"error": str(e), "_status": 400}
 
-    requested_model = s.model
-    requested_provider = getattr(s, "model_provider", None)
-    # Server-initiated wakeup (Option Z): resolve persisted model via the
-    # standard helper in cache-only mode so wakeups never trigger a cold
-    # catalog rebuild. Thread the session's PROFILE model defaults through too
-    # (mirrors _handle_chat_start) — a brand-new session that spawned a
-    # background task before its first human turn has an empty s.model, and
-    # without the profile defaults the resolver would fall back to the global
-    # DEFAULT_MODEL instead of the profile's configured default (greptile flag).
-    _pp_provider, _pp_default, _pp_cfg = _read_profile_model_config(s, requested_provider)
-    model, model_provider, normalized_model = _resolve_compatible_session_model_state(
-        requested_model,
-        requested_provider,
-        profile_provider=_pp_provider,
-        profile_default_model=_pp_default,
-        profile_config=_pp_cfg,
-        prefer_cached_catalog=True,
-    )
+    model, model_provider, normalized_model = _resolve_process_wakeup_session_model_state(s)
     _paused_wakeup_response = None
     with _get_session_agent_lock(s.session_id):
         try:
@@ -21930,17 +21957,7 @@ def start_session_turn(
         # The parent may change model while its child is running. Resolve again
         # from the freshly loaded record inside the acceptance boundary; child
         # execution metadata is never a parent-runtime instruction.
-        requested_model = s.model
-        requested_provider = getattr(s, "model_provider", None)
-        _pp_provider, _pp_default, _pp_cfg = _read_profile_model_config(s, requested_provider)
-        model, model_provider, normalized_model = _resolve_compatible_session_model_state(
-            requested_model,
-            requested_provider,
-            profile_provider=_pp_provider,
-            profile_default_model=_pp_default,
-            profile_config=_pp_cfg,
-            prefer_cached_catalog=True,
-        )
+        model, model_provider, normalized_model = _resolve_process_wakeup_session_model_state(s)
         if delegation_id:
             now = time.time()
             acceptances = dict(getattr(s, "delegation_acceptances", {}) or {})

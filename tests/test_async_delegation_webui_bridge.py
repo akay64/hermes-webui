@@ -1224,6 +1224,7 @@ def test_turn_context_falls_back_safely_when_core_has_no_route_api(monkeypatch):
 
 def test_delegation_acceptance_uses_current_parent_model_and_is_idempotent(monkeypatch):
     from api import routes
+    from api.models import model_explicit_pick_signature
 
     class _Session:
         def __init__(self, model, provider):
@@ -1231,6 +1232,7 @@ def test_delegation_acceptance_uses_current_parent_model_and_is_idempotent(monke
             self.session_id = "parent-session"
             self.model = model
             self.model_provider = provider
+            self.model_explicit_pick_signature: str | None = None
             self.profile = "hermes-coder"
             self.mode = "chat"
             self.paused = False
@@ -1244,6 +1246,9 @@ def test_delegation_acceptance_uses_current_parent_model_and_is_idempotent(monke
 
     stale = _Session("deepseek/delegate", "openrouter")
     current = _Session("openai/gpt-5.6-sol", "openai-codex")
+    current.model_explicit_pick_signature = model_explicit_pick_signature(
+        current.model, current.model_provider
+    )
     loads = iter([stale, current, current])
     monkeypatch.setattr(routes, "_agent_runtime_barrier_response", lambda **_kwargs: None)
     monkeypatch.setattr(routes, "get_session", lambda *_args, **_kwargs: next(loads))
@@ -1251,7 +1256,7 @@ def test_delegation_acceptance_uses_current_parent_model_and_is_idempotent(monke
     monkeypatch.setattr(routes, "_read_profile_model_config", lambda *_args: (None, None, {}))
     monkeypatch.setattr(
         routes, "_resolve_compatible_session_model_state",
-        lambda model, provider, **_kwargs: (model, provider, False),
+        lambda *_args, **_kwargs: ("deepseek-v4-flash", None, True),
     )
     monkeypatch.setattr(routes, "_get_session_agent_lock", lambda _sid: _NoopLock())
     starts = []
