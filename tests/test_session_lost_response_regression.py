@@ -1157,3 +1157,194 @@ def test_sync_revalidates_against_concurrent_disk_write_under_lock(monkeypatch):
     # On-disk record keeps the concurrent writer's value — not overwritten.
     reloaded = Session.load(sid)
     assert reloaded.active_stream_id == "rotated_stream_after_compression"
+
+
+def test_sync_fires_when_sidecar_has_more_messages_but_bloated(monkeypatch):
+    """Sidecar has MORE messages than state.db due to duplication. The bloat
+    heuristic must detect this and reconcile rather than skipping."""
+    sid = "state_bloated_sid"
+    stream_id = "stream_bloated"
+
+    legit = [
+        {"role": "user", "content": "q1", "timestamp": 100.0},
+        {"role": "assistant", "content": "a1", "timestamp": 101.0},
+    ]
+    dupes = [
+        {"role": "assistant", "content": "", "id": "dup",
+         "_db_persisted": True, "timestamp": 103.0},
+    ] * 50
+    s = Session(
+        session_id=sid, title="Bloated",
+        messages=legit + dupes,
+        active_stream_id=stream_id,
+        pending_user_message="new request",
+        pending_started_at=1000.0,  # old — past grace window
+    )
+    s.save()
+
+    state_messages = [
+        {"role": "user", "content": "q1", "timestamp": 100.0},
+        {"role": "assistant", "content": "a1", "timestamp": 101.0},
+        {"role": "user", "content": "new request", "timestamp": 102.0},
+        {"role": "assistant", "content": "recovered tail", "timestamp": 103.0},
+    ]
+    monkeypatch.setattr(
+        models, "get_state_db_session_summary",
+        lambda sid_arg, profile=None: {
+            "message_count": len(state_messages), "last_message_at": 103.0
+        },
+    )
+    monkeypatch.setattr(
+        models, "get_state_db_session_messages",
+        lambda sid_arg, **kwargs: list(state_messages),
+    )
+
+    result = models._sync_sidecar_from_state_db_if_newer(s)
+
+    assert result is True, "bloat heuristic must allow sync"
+    assert len(s.messages) == 4
+    assert s.active_stream_id is None
+    assert s.messages[-1]["content"] == "recovered tail"
+
+
+def test_sync_does_not_classify_idless_sidecar_as_bloated(monkeypatch):
+    """A sidecar with more messages than state.db but NO IDs at all must not
+    be classified as bloated — absence of IDs is not evidence of duplication."""
+    sid = "state_idless_sid"
+    stream_id = "stream_idless"
+
+    s = Session(
+        session_id=sid, title="ID-less",
+        messages=[
+            {"role": "user", "content": f"q{i}", "timestamp": 100.0 + i}
+            for i in range(5)
+        ] + [
+            {"role": "assistant", "content": f"a{i}", "timestamp": 105.0 + i}
+            for i in range(5)
+        ],
+        active_stream_id=stream_id,
+        pending_user_message="new request",
+        pending_started_at=1000.0,
+    )
+    s.save()
+
+    state_messages = [
+        {"role": "user", "content": "q0", "timestamp": 100.0},
+        {"role": "assistant", "content": "a0", "timestamp": 101.0},
+        {"role": "user", "content": "new request", "timestamp": 102.0},
+        {"role": "assistant", "content": "recovered", "timestamp": 103.0},
+    ]
+    monkeypatch.setattr(
+        models, "get_state_db_session_summary",
+        lambda sid_arg, profile=None: {
+            "message_count": len(state_messages), "last_message_at": 103.0
+        },
+    )
+    monkeypatch.setattr(
+        models, "get_state_db_session_messages",
+        lambda sid_arg, **kwargs: list(state_messages),
+    )
+
+    result = models._sync_sidecar_from_state_db_if_newer(s)
+
+    # Must NOT replace the ID-less sidecar wholesale
+    assert len(s.messages) >= 10, (
+        f"ID-less sidecar must not be replaced, got {len(s.messages)} messages"
+    )
+
+
+def test_sync_preserves_sidecar_only_rows_when_not_bloated(monkeypatch):
+    """A sidecar with unique-ID rows exceeding state.db count must not be
+    classified as bloated — unique IDs are not duplicates."""
+    sid = "state_legit_extra_sid"
+    stream_id = "stream_legit_extra"
+
+    s = Session(
+        session_id=sid, title="Legit extra",
+        messages=[
+            {"role": "user", "content": "q1", "id": "1", "timestamp": 100.0},
+            {"role": "assistant", "content": "a1", "id": "2", "timestamp": 101.0},
+            {"role": "assistant", "content": "", "id": "3",
+             "_recovered_from_run_journal": True, "timestamp": 101.5},
+            {"role": "user", "content": "q2", "id": "4", "timestamp": 102.0},
+            {"role": "assistant", "content": "a2", "id": "5", "timestamp": 103.0},
+        ],
+        active_stream_id=stream_id,
+        pending_user_message="new request",
+        pending_started_at=1000.0,
+    )
+    s.save()
+
+    state_messages = [
+        {"role": "user", "content": "q1", "timestamp": 100.0},
+        {"role": "assistant", "content": "a1", "timestamp": 101.0},
+        {"role": "user", "content": "new request", "timestamp": 102.0},
+        {"role": "assistant", "content": "recovered", "timestamp": 103.0},
+    ]
+    monkeypatch.setattr(
+        models, "get_state_db_session_summary",
+        lambda sid_arg, profile=None: {
+            "message_count": len(state_messages), "last_message_at": 103.0
+        },
+    )
+    monkeypatch.setattr(
+        models, "get_state_db_session_messages",
+        lambda sid_arg, **kwargs: list(state_messages),
+    )
+
+    result = models._sync_sidecar_from_state_db_if_newer(s)
+
+    # Sidecar has 5 unique-ID messages vs state.db's 4 — not bloated
+    assert len(s.messages) >= 5, (
+        f"Legitimate extra rows must be preserved, got {len(s.messages)}"
+    )
+    recovered = [m for m in s.messages if m.get("_recovered_from_run_journal")]
+    assert len(recovered) == 1, "Recovered row must be preserved"
+
+
+def test_sync_reconciles_state_db_count_ahead_when_timestamp_not_ahead(monkeypatch):
+    """State.db has MORE messages than the sidecar but its last timestamp is
+    NOT newer — the pre-lock guard must not block because counts differ.
+    This is the path a swapped `<=` guard would have blocked."""
+    sid = "state_count_ahead_sid"
+    stream_id = "stream_count_ahead"
+
+    s = Session(
+        session_id=sid, title="Count ahead",
+        messages=[
+            {"role": "user", "content": "q1", "timestamp": 100.0},
+            {"role": "assistant", "content": "a1", "timestamp": 105.0},
+        ],
+        active_stream_id=stream_id,
+        pending_user_message="new request",
+        pending_started_at=1000.0,
+    )
+    s.save()
+
+    state_messages = [
+        {"role": "user", "content": "q1", "timestamp": 100.0},
+        {"role": "assistant", "content": "a1", "timestamp": 101.0},
+        {"role": "user", "content": "new request", "timestamp": 102.0},
+        {"role": "assistant", "content": "recovered tail", "timestamp": 106.0},
+    ]
+    monkeypatch.setattr(
+        models, "get_state_db_session_summary",
+        lambda sid_arg, profile=None: {
+            "message_count": len(state_messages), "last_message_at": 105.0
+        },
+    )
+    monkeypatch.setattr(
+        models, "get_state_db_session_messages",
+        lambda sid_arg, **kwargs: list(state_messages),
+    )
+
+    result = models._sync_sidecar_from_state_db_if_newer(s)
+
+    # sidecar_count (2) != state_count (4) — counts differ, so the
+    # pre-lock guard's `==` check does not trigger even though
+    # state_last (105) <= sidecar_last (105). The guard would have
+    # blocked with `<=` — the production fix uses `==`.
+    assert result is True, "state.db count advance must reconcile"
+    assert len(s.messages) == 4
+    assert s.active_stream_id is None
+    assert s.messages[-1]["content"] == "recovered tail"

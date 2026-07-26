@@ -2936,13 +2936,24 @@ def _append_journaled_partial_output(
             _m = session.messages[_existing_idx]
             if not isinstance(_m, dict):
                 continue
+            if _m.get('role') != 'assistant':
+                continue
+            if str(_m.get('content') or '').strip():
+                continue
+            if str(_m.get('reasoning') or '').strip():
+                continue
+            # Recovered anchor for THIS stream: exact match, always reuse.
             if (
                 _m.get('_recovered_from_run_journal')
                 and _m.get('_recovered_stream_id') == stream_id
-                and _m.get('role') == 'assistant'
-                and not str(_m.get('content') or '').strip()
-                and not str(_m.get('reasoning') or '').strip()
             ):
+                current_assistant_idx = _existing_idx
+                return _existing_idx
+            # Non-recovered empty assistant (live-stream anchor): reuse as a
+            # fallback — any empty assistant is a valid anchor for tool cards.
+            # The backward scan means the most recent one wins, which is the
+            # correct anchor for the current turn.
+            if not _m.get('_recovered_from_run_journal'):
                 current_assistant_idx = _existing_idx
                 return _existing_idx
         session.messages.append({
@@ -3824,7 +3835,7 @@ def _sync_sidecar_from_state_db_if_newer(session) -> bool:
 
     # Fast negative (pre-lock): if state.db is not ahead by either count or
     # timestamp, do not pay for the lock. This keeps normal reads cheap.
-    if state_count <= sidecar_count and state_last <= sidecar_last:
+    if sidecar_count == state_count and state_last <= sidecar_last:
         return False
 
     # ── Under-lock critical section ──────────────────────────────────────────
@@ -3885,21 +3896,52 @@ def _sync_sidecar_from_state_db_if_newer(session) -> bool:
         )
         if not state_messages:
             return False
-        merged_messages = reconciled_state_db_messages_for_session(
-            locked,
-            state_messages=state_messages,
-        )
-        # The reconciler is append-only: a genuine state.db advance (output the
-        # lost stream never wrote back) shows up as MORE rows than the sidecar.
-        # A merged length not greater than the sidecar means nothing new to
-        # recover — leave the sidecar untouched rather than rewriting in place.
-        if len(merged_messages) <= locked_count:
-            return False
-        merged_context = reconciled_state_db_messages_for_session(
-            locked,
-            prefer_context=True,
-            state_messages=state_messages,
-        )
+
+        # Bloat detection (under-lock): only classify when ID coverage on the
+        # locked sidecar is high (>50% of messages carry an id) AND duplicate
+        # IDs account for a majority of the excess over state.db. An ID-less
+        # sidecar is not evidence of bloat — absence of IDs means they were
+        # never stamped, not that content was duplicated.
+        _sidecar_bloated = False
+        _id_bearing = [
+            m for m in locked_messages
+            if isinstance(m, dict) and m.get('id') is not None
+        ]
+        if locked_count > len(state_messages) and len(_id_bearing) > locked_count * 0.5:
+            _unique_ids = len({m['id'] for m in _id_bearing})
+            _duplicate_count = len(_id_bearing) - _unique_ids
+            if _duplicate_count > (locked_count - len(state_messages)) * 0.5:
+                _sidecar_bloated = True
+
+        # When the sidecar is bloated (duplicate-heavy), the append-only merge
+        # cannot recover — it would keep the duplicates as the "local prefix."
+        # Use state.db as the authoritative transcript directly.
+        if _sidecar_bloated:
+            merged_messages = list(state_messages)
+            # context_messages may carry compression state or divergent model
+            # context — reconcile through the normal path rather than wholesale
+            # replacement with raw state.db messages.
+            merged_context = reconciled_state_db_messages_for_session(
+                locked,
+                prefer_context=True,
+                state_messages=state_messages,
+            )
+        else:
+            merged_messages = reconciled_state_db_messages_for_session(
+                locked,
+                state_messages=state_messages,
+            )
+            # The reconciler is append-only: a genuine state.db advance (output the
+            # lost stream never wrote back) shows up as MORE rows than the sidecar.
+            # A merged length not greater than the sidecar means nothing new to
+            # recover — leave the sidecar untouched rather than rewriting in place.
+            if len(merged_messages) <= locked_count:
+                return False
+            merged_context = reconciled_state_db_messages_for_session(
+                locked,
+                prefer_context=True,
+                state_messages=state_messages,
+            )
 
         # Mutate + persist the freshly-loaded, locked object. Because we hold the
         # lock and reloaded under it, this save cannot clobber a concurrent

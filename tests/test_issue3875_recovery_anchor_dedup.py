@@ -128,3 +128,31 @@ def test_text_bearing_recovery_still_appends_real_content(hermes_home):
     assert any("Hello world" in m["content"] for m in recovered_text), (
         "token-bearing recovery must still append the visible assistant text"
     )
+
+
+def test_non_recovered_empty_assistant_is_reused_as_anchor(hermes_home):
+    """A non-recovered empty assistant (from the live stream, not from prior
+    recovery) must serve as the anchor — not get a duplicate appended."""
+    sid = "issue3875_live_empty"
+    stream_id = "stream-live"
+    _tool_first_journal(sid, stream_id)
+
+    s = Session(session_id=sid, title="repro", messages=[
+        {"role": "user", "content": "go"},
+        {"role": "assistant", "content": "", "id": "42",
+         "_db_persisted": True, "finish_reason": "incomplete"},
+    ])
+
+    _append_journaled_partial_output(s, stream_id, dedupe_existing=True)
+    _append_journaled_partial_output(s, stream_id, dedupe_existing=True)
+
+    empty_assistants = [
+        m for m in s.messages
+        if isinstance(m, dict)
+        and m.get("role") == "assistant"
+        and not str(m.get("content") or "").strip()
+        and not str(m.get("reasoning") or "").strip()
+    ]
+    assert len(empty_assistants) == 1, (
+        f"non-recovered empty assistant must be reused, got {len(empty_assistants)}"
+    )
