@@ -2335,6 +2335,20 @@ def _set_turn_session_identity(session_id: str):
         tokens["ui_session_id"] = _UI_SID.set(sid)
     except Exception:
         logger.debug("per-turn _SESSION_UI_SESSION_ID bind failed", exc_info=True)
+    try:
+        from gateway.session_context import bind_async_delivery_route
+        from api.process_event_utils import webui_delivery_namespace
+
+        tokens["async_delivery_route"] = bind_async_delivery_route({
+            "channel": "webui",
+            "namespace": webui_delivery_namespace(),
+            "owner": sid,
+        })
+    except (ImportError, AttributeError):
+        # Older cores have no named route and keep the existing shared-queue bridge.
+        pass
+    except Exception:
+        logger.warning("per-turn WebUI async-delivery route bind failed", exc_info=True)
     return tokens
 
 
@@ -2349,6 +2363,13 @@ def _reset_turn_session_identity(tokens) -> None:
     """
     if not tokens:
         return
+    tok = tokens.get("async_delivery_route")
+    if tok is not None:
+        try:
+            from gateway.session_context import reset_async_delivery_route
+            reset_async_delivery_route(tok)
+        except Exception:
+            logger.debug("per-turn async-delivery route reset failed", exc_info=True)
     tok = tokens.get("ui_session_id")
     if tok is not None:
         try:
@@ -8224,6 +8245,8 @@ def _run_agent_streaming(
             _last_persisted_provider = getattr(s, "model_provider", None)
             if _last_persisted_provider is not None:
                 _last_persisted_provider = str(_last_persisted_provider).strip().lower() or None
+            _before_ownership_model = _last_persisted_model
+            _before_ownership_provider = _last_persisted_provider
             _persisted_model_is_empty = _last_persisted_model in (None, "")
             _provider_matches = _last_persisted_provider in (None, provider_context)
             if _persisted_model_is_empty or (
@@ -9370,16 +9393,32 @@ def _run_agent_streaming(
                     _cached = SESSION_AGENT_CACHE.get(session_id)
                     if _cached and _cached[1] == _agent_sig:
                         _cached_agent = _cached[0]
-                        if _cached_agent_matches_session(_cached_agent, session_id):
+                        _cached_model = str(getattr(_cached_agent, 'model', '') or '').strip()
+                        _cached_provider = str(getattr(_cached_agent, 'provider', '') or '').strip().lower()
+                        _expected_model = str(resolved_model or '').strip()
+                        _expected_provider = str(resolved_provider or '').strip().lower()
+                        _runtime_identity_matches = (
+                            _cached_model == _expected_model
+                            and _cached_provider == _expected_provider
+                        )
+                        if (
+                            _cached_agent_matches_session(_cached_agent, session_id)
+                            and _runtime_identity_matches
+                        ):
                             agent = _cached_agent
                             SESSION_AGENT_CACHE.move_to_end(session_id)  # LRU: mark as recently used
                             logger.debug('[webui] Reusing cached agent for session %s', session_id)
                         else:
                             _identity_mismatch_entry = SESSION_AGENT_CACHE.pop(session_id, None)
                             logger.warning(
-                                '[webui] Evicted cached agent with mismatched session identity: cache_key=%s agent_session_id=%s',
+                                '[webui] Evicted cached agent with mismatched runtime identity: '
+                                'cache_key=%s agent_session_id=%s expected=%r/%r actual=%r/%r',
                                 session_id,
                                 _cached_agent_session_identity(_cached_agent),
+                                _expected_model,
+                                _expected_provider,
+                                _cached_model,
+                                _cached_provider,
                             )
                     if agent is not None:
                         # Reopened/cache-hit sessions must register the agent

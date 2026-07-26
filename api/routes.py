@@ -21839,6 +21839,7 @@ def start_session_turn(
     message: str,
     *,
     source: str = "process_wakeup",
+    delegation_id: str | None = None,
 ):
     """Start a server-side agent turn for ``session_id`` with ``message``.
 
@@ -21914,6 +21915,47 @@ def start_session_turn(
             s = get_session(session_id)
         except KeyError:
             return {"error": "Session not found", "_status": 404}
+        # The parent may change model while its child is running. Resolve again
+        # from the freshly loaded record inside the acceptance boundary; child
+        # execution metadata is never a parent-runtime instruction.
+        requested_model = s.model
+        requested_provider = getattr(s, "model_provider", None)
+        _pp_provider, _pp_default, _pp_cfg = _read_profile_model_config(s, requested_provider)
+        model, model_provider, normalized_model = _resolve_compatible_session_model_state(
+            requested_model,
+            requested_provider,
+            profile_provider=_pp_provider,
+            profile_default_model=_pp_default,
+            profile_config=_pp_cfg,
+            prefer_cached_catalog=True,
+        )
+        if delegation_id:
+            now = time.time()
+            acceptances = dict(getattr(s, "delegation_acceptances", {}) or {})
+            existing = acceptances.get(delegation_id)
+            if isinstance(existing, dict):
+                existing_stream = str(existing.get("stream_id") or "")
+                if existing_stream:
+                    return {"stream_id": existing_stream, "_status": 200, "deduplicated": True}
+                active_stream = str(getattr(s, "active_stream_id", "") or "")
+                if active_stream and existing.get("state") == "reserved":
+                    existing["state"] = "started"
+                    existing["stream_id"] = active_stream
+                    acceptances[delegation_id] = existing
+                    s.delegation_acceptances = acceptances
+                    s.save(touch_updated_at=False)
+                    return {"stream_id": active_stream, "_status": 200, "deduplicated": True}
+                if now - float(existing.get("reserved_at") or now) < 30:
+                    return {"error": "delegation_acceptance_pending", "_status": 409}
+            acceptances[delegation_id] = {"state": "reserved", "reserved_at": now}
+            while len(acceptances) > 128:
+                oldest = min(
+                    acceptances,
+                    key=lambda key: float((acceptances.get(key) or {}).get("reserved_at") or 0),
+                )
+                acceptances.pop(oldest, None)
+            s.delegation_acceptances = acceptances
+            s.save(touch_updated_at=False)
         _wakeup_reasoning_effort = getattr(s, "reasoning_effort", None)
         if clear_process_wakeup_pause_if_model_changed(
             s,
@@ -22033,6 +22075,24 @@ def start_session_turn(
         source=turn_source,
         route="start_session_turn",
     )
+    if delegation_id:
+        status = int((resp or {}).get("_status", 200) or 200)
+        stream_id = str((resp or {}).get("stream_id") or "")
+        with _get_session_agent_lock(session_id):
+            try:
+                accepted_session = get_session(session_id)
+                acceptances = dict(getattr(accepted_session, "delegation_acceptances", {}) or {})
+                entry = dict(acceptances.get(delegation_id) or {})
+                if status < 400 and stream_id:
+                    entry.update({"state": "started", "stream_id": stream_id, "started_at": time.time()})
+                else:
+                    acceptances.pop(delegation_id, None)
+                if entry and status < 400 and stream_id:
+                    acceptances[delegation_id] = entry
+                accepted_session.delegation_acceptances = acceptances
+                accepted_session.save(touch_updated_at=False)
+            except Exception:
+                logger.warning("failed to persist delegation acceptance %s", delegation_id, exc_info=True)
 
     # ── Defect B: live-view of server-initiated turns ──────────────────────
     # Option Z starts this turn server-side, so NO browser EventSource is

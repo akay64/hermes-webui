@@ -1201,6 +1201,7 @@ class Session:
                  pending_attachments=None,
                  pending_started_at=None,
                  pending_user_source: str=None,
+                 delegation_acceptances=None,
                  context_messages=None,
                  compression_anchor_visible_idx=None,
                  compression_anchor_message_key=None,
@@ -1273,6 +1274,9 @@ class Session:
         self.pending_attachments = pending_attachments or []
         self.pending_started_at = pending_started_at
         self.pending_user_source = pending_user_source
+        self.delegation_acceptances = (
+            dict(delegation_acceptances) if isinstance(delegation_acceptances, dict) else {}
+        )
         self.context_messages = context_messages if isinstance(context_messages, list) else []
         self.compression_anchor_visible_idx = compression_anchor_visible_idx
         self.compression_anchor_message_key = compression_anchor_message_key
@@ -1380,6 +1384,7 @@ class Session:
             'cache_read_tokens', 'cache_write_tokens',
             'personality', 'active_stream_id',
             'pending_user_message', 'pending_attachments', 'pending_started_at', 'pending_user_source',
+            'delegation_acceptances',
             'compression_anchor_visible_idx', 'compression_anchor_message_key',
             'compression_anchor_summary', 'pre_compression_snapshot',
             'context_engine', 'compression_anchor_engine', 'compression_anchor_mode',

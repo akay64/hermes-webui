@@ -2077,6 +2077,11 @@ async function _loadSessionOnce(sid){
     if (_isCurrentLoad()) _loadingSessionId=null;
     return _loadSessionOnce(continuationSid,{...opts,skipLineageResolve:true,skipContinuationResolve:true,force:true,_preloadNotified:true});
   }
+  // Invalidate any model-catalog refresh started for the session we are leaving
+  // before exposing the newly loaded session. populateModelDropdown() checks this
+  // sequence after each await, so a late delegate-session response cannot rebuild
+  // the picker against the restored parent session.
+  if(typeof _modelDropdownRequestSeq==='number') _modelDropdownRequestSeq++;
   S.session=data.session;
   if(typeof _clearEmptyComposerModelOverride==='function') _clearEmptyComposerModelOverride();
   // Loading a real existing session abandons any pre-session toolset override

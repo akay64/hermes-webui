@@ -46,6 +46,7 @@ import queue
 import threading
 import time
 import uuid
+from types import SimpleNamespace
 from typing import Any, Optional
 
 from api.process_event_utils import (
@@ -53,15 +54,21 @@ from api.process_event_utils import (
     claim_async_delegation_delivery,
     complete_async_delegation_delivery,
     completion_delivery_id,
+    discard_async_delegation_delivery,
     release_async_delegation_delivery,
     requeue_async_delegation_event,
     schedule_async_delegation_claim_retry,
+    active_hermes_home,
+    webui_delivery_namespace,
 )
 
 logger = logging.getLogger(__name__)
 
 _DRAIN_THREAD: Optional[threading.Thread] = None
 _DRAIN_STOP = threading.Event()
+_WEBUI_DELEGATION_QUEUE: queue.Queue = queue.Queue()
+_WEBUI_DELEGATION_REGISTRY = SimpleNamespace(completion_queue=_WEBUI_DELEGATION_QUEUE)
+_WEBUI_DELEGATION_SINK_REGISTERED = False
 _PROCESS_RECOVERY_DONE = False
 _PROCESS_CHECKPOINT_RECOVERED = False
 _PROCESS_RECOVERY_LOCK = threading.Lock()
@@ -967,6 +974,7 @@ def _start_async_delegation_wakeup_turn(
                 session_id,
                 wakeup_prompt,
                 source="process_wakeup",
+                delegation_id=delegation_id,
             )
             raw_status = (resp or {}).get("_status")
             if raw_status is None:
@@ -979,14 +987,15 @@ def _start_async_delegation_wakeup_turn(
                     session_id=session_id,
                     claim=claim,
                 )
-                logger.info(
-                    "async delegation wakeup turn accepted for session %s "
-                    "(stream_id=%s)",
-                    session_id,
-                    (resp or {}).get("stream_id"),
-                )
                 return
 
+            if status == 404 and str(evt.get("delivery_channel") or "legacy_queue") == "webui":
+                discard_async_delegation_delivery(evt, claim, "parent_session_missing")
+                logger.info(
+                    "discarded async delegation %s because parent session %s is missing",
+                    delegation_id, session_id,
+                )
+                return
             release_async_delegation_delivery(evt, claim)
             _requeue_async_delegation_event(process_registry, evt, claim=claim)
             if status == 409 and (resp or {}).get("error") == "process_wakeup_paused":
@@ -1109,6 +1118,8 @@ def _process_one(evt: dict) -> None:
         from tools.process_registry import process_registry as _process_registry
     except Exception:
         _process_registry = None
+    if str(evt.get("delivery_channel") or "legacy_queue") == "webui":
+        _process_registry = _WEBUI_DELEGATION_REGISTRY
 
     process_id = completion_delivery_id(evt)
     session_key = str(evt.get("session_key") or "")
@@ -1589,6 +1600,16 @@ def _drain_loop() -> None:
         return
     logger.info("bg_task_complete drain thread started")
     while not _DRAIN_STOP.is_set():
+        try:
+            webui_evt = _WEBUI_DELEGATION_QUEUE.get_nowait()
+        except queue.Empty:
+            webui_evt = None
+        if isinstance(webui_evt, dict):
+            try:
+                _process_one(webui_evt)
+            except Exception:
+                logger.warning("WebUI delegation event handling failed", exc_info=True)
+            continue
         # Read the queue defensively: a rebuilt/partially-initialized registry
         # may not expose ``completion_queue`` (mirrors streaming.py's
         # ``getattr(process_registry, 'completion_queue', None)`` guard). Direct
@@ -1714,7 +1735,7 @@ def forget_bg_task_completion_dedup(session_id: str) -> None:
 
 def start_drain_thread() -> bool:
     """Start the background drain thread idempotently. Returns True on first start."""
-    global _DRAIN_THREAD
+    global _DRAIN_THREAD, _WEBUI_DELEGATION_SINK_REGISTERED
     with _THREAD_LIFECYCLE_LOCK:
         if _DRAIN_THREAD is not None and _DRAIN_THREAD.is_alive():
             return False
@@ -1724,6 +1745,25 @@ def start_drain_thread() -> bool:
             # Recovery is best-effort. A corrupt checkpoint or transient I/O
             # error must not disable notifications for newly spawned tasks.
             logger.warning("background process recovery failed", exc_info=True)
+        try:
+            from tools.async_delegation import (
+                register_completion_sink,
+                restore_undelivered_completions,
+            )
+
+            namespace = webui_delivery_namespace()
+            register_completion_sink("webui", namespace, _WEBUI_DELEGATION_QUEUE.put_nowait)
+            _WEBUI_DELEGATION_SINK_REGISTERED = True
+            restore_undelivered_completions(
+                _WEBUI_DELEGATION_QUEUE,
+                channel="webui",
+                namespace=namespace,
+                hermes_home=active_hermes_home(),
+            )
+        except (ImportError, AttributeError):
+            logger.info("Hermes core has no first-class WebUI delegation sink; using legacy queue")
+        except Exception:
+            logger.warning("WebUI delegation sink registration failed", exc_info=True)
         _DRAIN_STOP.clear()
         _DRAIN_THREAD = threading.Thread(
             target=_drain_loop,
@@ -1735,7 +1775,15 @@ def start_drain_thread() -> bool:
 
 
 def stop_drain_thread(timeout: float = 2.0) -> None:
+    global _WEBUI_DELEGATION_SINK_REGISTERED
     _DRAIN_STOP.set()
     th = _DRAIN_THREAD
     if th is not None and th.is_alive():
         th.join(timeout=timeout)
+    if _WEBUI_DELEGATION_SINK_REGISTERED:
+        try:
+            from tools.async_delegation import unregister_completion_sink
+            unregister_completion_sink("webui", webui_delivery_namespace())
+        except Exception:
+            logger.debug("WebUI delegation sink unregister failed", exc_info=True)
+        _WEBUI_DELEGATION_SINK_REGISTERED = False

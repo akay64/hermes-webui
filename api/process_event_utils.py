@@ -3,14 +3,36 @@ from __future__ import annotations
 
 from collections import OrderedDict
 from dataclasses import dataclass
+import hashlib
 import logging
 import math
+import os
+from pathlib import Path
 import re
 import threading
 import time
 from typing import Any
 
 logger = logging.getLogger(__name__)
+
+
+def webui_delivery_namespace() -> str:
+    """Stable identity for this WebUI state store across process restarts."""
+    from api.config import STATE_DIR
+
+    identity = (
+        f"{Path(STATE_DIR).expanduser().resolve()}\0"
+        f"{Path(os.environ.get('HERMES_HOME', '~/.hermes')).expanduser().resolve()}"
+    )
+    return "webui-" + hashlib.sha256(identity.encode("utf-8")).hexdigest()[:24]
+
+
+def active_hermes_home() -> Path:
+    try:
+        from api.profiles import get_active_hermes_home
+        return Path(get_active_hermes_home()).expanduser().resolve()
+    except Exception:
+        return Path(os.environ.get("HERMES_HOME", "~/.hermes")).expanduser().resolve()
 
 # Older Hermes Agent builds do not expose durable claim/complete/release APIs.
 # Keep their in-process compatibility dedupe bounded so long-lived WebUI
@@ -189,7 +211,10 @@ def _release_bounded_local(delegation_id: str) -> None:
         _LEGACY_ASYNC_DELIVERY_IDS.pop(delegation_id, None)
 
 
-def _arm_async_delegation_restore_sweep(completion_queue: Any, delay: float) -> bool:
+def _arm_async_delegation_restore_sweep(
+    completion_queue: Any, delay: float, *, channel: str = "legacy_queue",
+    namespace: str = "",
+) -> bool:
     """Arm one process-wide durable restore sweep at the earliest deadline.
 
     The durable database is the backlog. Keeping one shared timer avoids both
@@ -236,7 +261,15 @@ def _arm_async_delegation_restore_sweep(completion_queue: Any, delay: float) -> 
             try:
                 from tools.async_delegation import restore_undelivered_completions
 
-                restore_undelivered_completions(target_queue)
+                if channel == "legacy_queue":
+                    restore_undelivered_completions(target_queue)
+                else:
+                    restore_undelivered_completions(
+                        target_queue,
+                        channel=channel,
+                        namespace=namespace,
+                        hermes_home=active_hermes_home(),
+                    )
             except Exception:
                 logger.warning(
                     "Failed to restore pending async delegations; retrying sweep",
@@ -245,6 +278,8 @@ def _arm_async_delegation_restore_sweep(completion_queue: Any, delay: float) -> 
                 _arm_async_delegation_restore_sweep(
                     target_queue,
                     ASYNC_DELIVERY_ROUTING_RETRY_SECONDS,
+                    channel=channel,
+                    namespace=namespace,
                 )
 
         timer = threading.Timer(retry_delay, _restore)
@@ -285,7 +320,17 @@ def schedule_async_delegation_claim_retry(
     retry_delay = (
         ASYNC_DELIVERY_CLAIM_RETRY_SECONDS if delay is None else max(0.0, float(delay))
     )
-    return _arm_async_delegation_restore_sweep(completion_queue, retry_delay)
+    if str(evt.get("delivery_channel") or "legacy_queue") == "webui":
+        timer = threading.Timer(retry_delay, lambda: completion_queue.put(dict(evt)))
+        timer.daemon = True
+        timer.start()
+        return True
+    return _arm_async_delegation_restore_sweep(
+        completion_queue,
+        retry_delay,
+        channel="legacy_queue",
+        namespace="",
+    )
 
 
 def requeue_async_delegation_event(
@@ -373,7 +418,20 @@ def claim_async_delegation_delivery(
         )
 
     try:
-        claim_id = claim_event_delivery(evt, str(consumer or "webui"))
+        channel = str(evt.get("delivery_channel") or "legacy_queue")
+        namespace = str(evt.get("delivery_namespace") or "")
+        owner = str(evt.get("delivery_owner") or "")
+        if channel == "webui":
+            claim_id = claim_event_delivery(
+                evt,
+                str(consumer or "webui"),
+                expected_channel=channel,
+                expected_namespace=namespace,
+                expected_owner=owner,
+                hermes_home=active_hermes_home(),
+            )
+        else:
+            claim_id = claim_event_delivery(evt, str(consumer or "webui"))
     except Exception:
         _release_bounded_local(delegation_id)
         logger.warning(
@@ -395,7 +453,9 @@ def claim_async_delegation_delivery(
 def _mark_legacy_async_delivery_complete(delegation_id: str) -> bool:
     """Acknowledge completion through progressively older core APIs."""
     try:
-        from tools import async_delegation as async_delivery
+        import importlib
+
+        async_delivery = importlib.import_module("tools.async_delegation")
     except Exception:
         return False
 
@@ -431,10 +491,19 @@ def complete_async_delegation_delivery(
 ) -> None:
     """Complete a claim after WebUI has accepted the event for delivery."""
     if claim.durable:
-        from tools.async_delegation import complete_event_delivery
-
         try:
-            complete_event_delivery(evt, claim.claim_id)
+            if str(evt.get("delivery_channel") or "legacy_queue") == "webui":
+                from tools.async_delegation import complete_completion_delivery
+
+                complete_completion_delivery(
+                    claim.delegation_id,
+                    claim.claim_id,
+                    hermes_home=active_hermes_home(),
+                )
+            else:
+                from tools.async_delegation import complete_event_delivery
+
+                complete_event_delivery(evt, claim.claim_id)
             _cancel_async_delegation_claim_retry(claim.delegation_id)
             return
         except Exception:
@@ -458,9 +527,18 @@ def release_async_delegation_delivery(
     """Release a failed claim so a later WebUI consumer can retry it."""
     try:
         if claim.durable:
-            from tools.async_delegation import release_event_delivery
+            if str(evt.get("delivery_channel") or "legacy_queue") == "webui":
+                from tools.async_delegation import release_completion_delivery
 
-            release_event_delivery(evt, claim.claim_id)
+                release_completion_delivery(
+                    claim.delegation_id,
+                    claim.claim_id,
+                    hermes_home=active_hermes_home(),
+                )
+            else:
+                from tools.async_delegation import release_event_delivery
+
+                release_event_delivery(evt, claim.claim_id)
     except Exception:
         logger.warning(
             "Failed to release durable async delegation delivery for %s",
@@ -469,6 +547,27 @@ def release_async_delegation_delivery(
         )
     finally:
         _release_bounded_local(claim.delegation_id)
+
+
+def discard_async_delegation_delivery(
+    evt: Any,
+    claim: AsyncDelegationDeliveryClaim,
+    reason: str,
+) -> bool:
+    """Terminally discard a first-class completion that cannot ever be routed."""
+    if not claim.durable:
+        _release_bounded_local(claim.delegation_id)
+        return False
+    from tools.async_delegation import discard_completion_delivery
+
+    discarded = discard_completion_delivery(
+        claim.delegation_id,
+        claim.claim_id,
+        reason,
+        hermes_home=active_hermes_home(),
+    )
+    _release_bounded_local(claim.delegation_id)
+    return bool(discarded)
 
 
 def legacy_async_delivery_dedupe_size() -> int:

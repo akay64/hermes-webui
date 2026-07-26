@@ -1109,3 +1109,99 @@ def test_next_turn_drain_respects_origin_over_session_key_index(monkeypatch):
     assert delivery["release"] == []
 
 
+def test_turn_context_binds_stable_webui_delivery_route():
+    try:
+        from gateway.session_context import get_async_delivery_route
+    except ImportError:
+        pytest.skip("installed hermes-agent predates first-class delivery routes")
+
+    tokens = streaming._set_turn_session_identity("parent-session")
+    try:
+        route = get_async_delivery_route()
+        assert route["channel"] == "webui"
+        assert route["owner"] == "parent-session"
+        assert route["namespace"] == peu.webui_delivery_namespace()
+    finally:
+        streaming._reset_turn_session_identity(tokens)
+    assert get_async_delivery_route()["channel"] == "legacy_queue"
+
+
+def test_turn_context_falls_back_safely_when_core_has_no_route_api(monkeypatch):
+    """A new WebUI against an older core keeps its existing shared-queue path."""
+    from contextvars import ContextVar
+
+    old_context = types.ModuleType("gateway.session_context")
+    setattr(old_context, "_SESSION_KEY", ContextVar("old_core_session_key", default=""))
+    setattr(
+        old_context,
+        "_SESSION_UI_SESSION_ID",
+        ContextVar("old_core_ui_session_id", default=""),
+    )
+    monkeypatch.setitem(sys.modules, "gateway.session_context", old_context)
+
+    tokens = streaming._set_turn_session_identity("parent-session")
+    try:
+        assert "async_delivery_route" not in tokens
+        assert old_context._SESSION_KEY.get() == "parent-session"
+        assert old_context._SESSION_UI_SESSION_ID.get() == "parent-session"
+    finally:
+        streaming._reset_turn_session_identity(tokens)
+    assert old_context._SESSION_KEY.get() == ""
+    assert old_context._SESSION_UI_SESSION_ID.get() == ""
+
+
+def test_delegation_acceptance_uses_current_parent_model_and_is_idempotent(monkeypatch):
+    from api import routes
+
+    class _Session:
+        def __init__(self, model, provider):
+            self.id = "parent-session"
+            self.session_id = "parent-session"
+            self.model = model
+            self.model_provider = provider
+            self.profile = "hermes-coder"
+            self.mode = "chat"
+            self.paused = False
+            self.pending_user_message = None
+            self.pending_user_source = None
+            self.delegation_acceptances = {}
+            self.active_stream_id = None
+
+        def save(self, **_kwargs):
+            return None
+
+    stale = _Session("deepseek/delegate", "openrouter")
+    current = _Session("openai/gpt-5.6-sol", "openai-codex")
+    loads = iter([stale, current, current])
+    monkeypatch.setattr(routes, "_agent_runtime_barrier_response", lambda **_kwargs: None)
+    monkeypatch.setattr(routes, "get_session", lambda *_args, **_kwargs: next(loads))
+    monkeypatch.setattr(routes, "_resolve_chat_workspace_with_recovery", lambda *_args: "/tmp")
+    monkeypatch.setattr(routes, "_read_profile_model_config", lambda *_args: (None, None, {}))
+    monkeypatch.setattr(
+        routes, "_resolve_compatible_session_model_state",
+        lambda model, provider, **_kwargs: (model, provider, False),
+    )
+    monkeypatch.setattr(routes, "_get_session_agent_lock", lambda _sid: _NoopLock())
+    starts = []
+
+    def _start_run(_session, **kwargs):
+        starts.append(kwargs)
+        return {"stream_id": "stream-first"}
+
+    monkeypatch.setattr(routes, "_start_run", _start_run)
+    first = routes.start_session_turn(
+        "parent-session", "delegate result", source="process_wakeup",
+        delegation_id="deleg-model-safe",
+    )
+    monkeypatch.setattr(routes, "get_session", lambda *_args, **_kwargs: current)
+    second = routes.start_session_turn(
+        "parent-session", "duplicate delegate result", source="process_wakeup",
+        delegation_id="deleg-model-safe",
+    )
+
+    assert first["stream_id"] == second["stream_id"] == "stream-first"
+    assert len(starts) == 1
+    assert starts[0]["model"] == current.model == "openai/gpt-5.6-sol"
+    assert starts[0]["model_provider"] == current.model_provider == "openai-codex"
+
+
