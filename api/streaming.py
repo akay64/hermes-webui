@@ -2337,12 +2337,13 @@ def _set_turn_session_identity(session_id: str):
         logger.debug("per-turn _SESSION_UI_SESSION_ID bind failed", exc_info=True)
     try:
         from gateway.session_context import bind_async_delivery_route
-        from api.process_event_utils import webui_delivery_namespace
+        from api.process_event_utils import active_hermes_home, webui_delivery_namespace
 
         tokens["async_delivery_route"] = bind_async_delivery_route({
             "channel": "webui",
             "namespace": webui_delivery_namespace(),
             "owner": sid,
+            "store": str(active_hermes_home()),
         })
     except (ImportError, AttributeError):
         # Older cores have no named route and keep the existing shared-queue bridge.

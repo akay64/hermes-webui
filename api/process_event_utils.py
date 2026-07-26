@@ -34,6 +34,16 @@ def active_hermes_home() -> Path:
     except Exception:
         return Path(os.environ.get("HERMES_HOME", "~/.hermes")).expanduser().resolve()
 
+
+def event_delivery_hermes_home(evt: Any) -> Path:
+    """Return the validated durable store captured by a first-class event."""
+    store = str((evt or {}).get("delivery_store") or "").strip() if isinstance(evt, dict) else ""
+    if not store:
+        raise ValueError("WebUI delegation event is missing its delivery store")
+    from api.profiles import resolve_delivery_hermes_home
+
+    return resolve_delivery_hermes_home(store)
+
 # Older Hermes Agent builds do not expose durable claim/complete/release APIs.
 # Keep their in-process compatibility dedupe bounded so long-lived WebUI
 # processes cannot retain every delegation id forever.
@@ -213,7 +223,7 @@ def _release_bounded_local(delegation_id: str) -> None:
 
 def _arm_async_delegation_restore_sweep(
     completion_queue: Any, delay: float, *, channel: str = "legacy_queue",
-    namespace: str = "",
+    namespace: str = "", hermes_home: Path | None = None,
 ) -> bool:
     """Arm one process-wide durable restore sweep at the earliest deadline.
 
@@ -268,7 +278,7 @@ def _arm_async_delegation_restore_sweep(
                         target_queue,
                         channel=channel,
                         namespace=namespace,
-                        hermes_home=active_hermes_home(),
+                        hermes_home=hermes_home,
                     )
             except Exception:
                 logger.warning(
@@ -280,6 +290,7 @@ def _arm_async_delegation_restore_sweep(
                     ASYNC_DELIVERY_ROUTING_RETRY_SECONDS,
                     channel=channel,
                     namespace=namespace,
+                    hermes_home=hermes_home,
                 )
 
         timer = threading.Timer(retry_delay, _restore)
@@ -304,7 +315,14 @@ def schedule_async_delegation_claim_retry(
     try:
         from tools.async_delegation import get_durable_delegation
 
-        durable = get_durable_delegation(delegation_id)
+        channel = str(evt.get("delivery_channel") or "legacy_queue")
+        if channel == "webui":
+            durable = get_durable_delegation(
+                delegation_id,
+                hermes_home=event_delivery_hermes_home(evt),
+            )
+        else:
+            durable = get_durable_delegation(delegation_id)
     except (ImportError, AttributeError):
         return False
     except Exception:
@@ -364,7 +382,8 @@ def requeue_async_delegation_event(
         return True
     except Exception:
         logger.warning("Failed to requeue async delegation event", exc_info=True)
-        if durable is True:
+        channel = str(evt.get("delivery_channel") or "legacy_queue")
+        if durable is True and channel == "legacy_queue":
             return _arm_async_delegation_restore_sweep(
                 completion_queue,
                 ASYNC_DELIVERY_ROUTING_RETRY_SECONDS,
@@ -428,7 +447,7 @@ def claim_async_delegation_delivery(
                 expected_channel=channel,
                 expected_namespace=namespace,
                 expected_owner=owner,
-                hermes_home=active_hermes_home(),
+                hermes_home=event_delivery_hermes_home(evt),
             )
         else:
             claim_id = claim_event_delivery(evt, str(consumer or "webui"))
@@ -498,7 +517,7 @@ def complete_async_delegation_delivery(
                 complete_completion_delivery(
                     claim.delegation_id,
                     claim.claim_id,
-                    hermes_home=active_hermes_home(),
+                    hermes_home=event_delivery_hermes_home(evt),
                 )
             else:
                 from tools.async_delegation import complete_event_delivery
@@ -533,7 +552,7 @@ def release_async_delegation_delivery(
                 release_completion_delivery(
                     claim.delegation_id,
                     claim.claim_id,
-                    hermes_home=active_hermes_home(),
+                    hermes_home=event_delivery_hermes_home(evt),
                 )
             else:
                 from tools.async_delegation import release_event_delivery
@@ -564,7 +583,7 @@ def discard_async_delegation_delivery(
         claim.delegation_id,
         claim.claim_id,
         reason,
-        hermes_home=active_hermes_home(),
+        hermes_home=event_delivery_hermes_home(evt),
     )
     _release_bounded_local(claim.delegation_id)
     return bool(discarded)

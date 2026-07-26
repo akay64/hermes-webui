@@ -1121,9 +1121,81 @@ def test_turn_context_binds_stable_webui_delivery_route():
         assert route["channel"] == "webui"
         assert route["owner"] == "parent-session"
         assert route["namespace"] == peu.webui_delivery_namespace()
+        assert route["store"] == str(peu.active_hermes_home())
     finally:
         streaming._reset_turn_session_identity(tokens)
     assert get_async_delivery_route()["channel"] == "legacy_queue"
+
+
+def test_first_class_delivery_uses_event_store_not_ambient_profile(monkeypatch, tmp_path):
+    _reset_wakeup_state()
+    store_a = (tmp_path / "profiles" / "a").resolve()
+    ambient_b = (tmp_path / "profiles" / "b").resolve()
+    store_a.mkdir(parents=True)
+    ambient_b.mkdir(parents=True)
+    calls = []
+    fake_mod = types.ModuleType("tools.async_delegation")
+
+    def _claim(evt, consumer, **kwargs):
+        calls.append(("claim", Path(kwargs["hermes_home"]), dict(evt), consumer))
+        return "claim-a"
+
+    def _complete(delegation_id, claim_id, **kwargs):
+        calls.append(("complete", Path(kwargs["hermes_home"]), delegation_id, claim_id))
+        return True
+
+    fake_mod.__dict__.update({
+        "claim_event_delivery": _claim,
+        "complete_event_delivery": lambda *_args, **_kwargs: True,
+        "release_event_delivery": lambda *_args, **_kwargs: True,
+        "complete_completion_delivery": _complete,
+    })
+    fake_pkg = sys.modules.get("tools") or types.ModuleType("tools")
+    monkeypatch.setitem(sys.modules, "tools", fake_pkg)
+    monkeypatch.setitem(sys.modules, "tools.async_delegation", fake_mod)
+    monkeypatch.setattr(peu, "active_hermes_home", lambda: ambient_b)
+    monkeypatch.setattr("api.profiles.resolve_delivery_hermes_home", lambda value: Path(value).resolve())
+    evt = _async_delegation_event(
+        delivery_channel="webui",
+        delivery_namespace="install-a",
+        delivery_owner="webui-session-1",
+        delivery_store=str(store_a),
+    )
+
+    claim = peu.claim_async_delegation_delivery(evt, "webui-background")
+    assert claim is not None
+    peu.complete_async_delegation_delivery(evt, claim)
+
+    assert [call[1] for call in calls] == [store_a, store_a]
+    assert ambient_b not in [call[1] for call in calls]
+
+
+def test_startup_restores_every_webui_profile_store(monkeypatch, tmp_path):
+    bp.stop_drain_thread()
+    _install_fake_process_registry(monkeypatch)
+    stores = [(tmp_path / "default").resolve(), (tmp_path / "profiles" / "coder").resolve()]
+    for store in stores:
+        store.mkdir(parents=True)
+    restored = []
+    fake_mod = types.ModuleType("tools.async_delegation")
+    fake_mod.__dict__.update({
+        "register_completion_sink": lambda *_args, **_kwargs: None,
+        "unregister_completion_sink": lambda *_args, **_kwargs: True,
+        "restore_undelivered_completions": (
+            lambda _queue, **kwargs: restored.append(Path(kwargs["hermes_home"]).resolve()) or 0
+        ),
+    })
+    fake_pkg = sys.modules.get("tools") or types.ModuleType("tools")
+    monkeypatch.setitem(sys.modules, "tools", fake_pkg)
+    monkeypatch.setitem(sys.modules, "tools.async_delegation", fake_mod)
+    monkeypatch.setattr(bp, "recover_processes_for_webui", lambda: None)
+    monkeypatch.setattr("api.profiles.delivery_profile_homes", lambda: stores)
+
+    try:
+        assert bp.start_drain_thread()
+        assert restored == stores
+    finally:
+        bp.stop_drain_thread()
 
 
 def test_turn_context_falls_back_safely_when_core_has_no_route_api(monkeypatch):
@@ -1203,5 +1275,51 @@ def test_delegation_acceptance_uses_current_parent_model_and_is_idempotent(monke
     assert len(starts) == 1
     assert starts[0]["model"] == current.model == "openai/gpt-5.6-sol"
     assert starts[0]["model_provider"] == current.model_provider == "openai-codex"
+
+
+def test_reserved_delegation_does_not_adopt_competing_human_stream(monkeypatch):
+    from api import routes
+
+    class _Session:
+        session_id = "parent-session"
+        id = session_id
+        model = "openai/gpt-5.6-sol"
+        model_provider = "openai-codex"
+        profile = "hermes-coder"
+        mode = "chat"
+        paused = False
+        pending_user_message = "human prompt"
+        pending_user_source = "webui"
+        active_stream_id = "human-stream"
+        delegation_acceptances = {
+            "deleg-crash": {"state": "reserved", "reserved_at": time.time()}
+        }
+
+        def save(self, **_kwargs):
+            return None
+
+    session = _Session()
+    monkeypatch.setattr(routes, "_agent_runtime_barrier_response", lambda **_kwargs: None)
+    monkeypatch.setattr(routes, "get_session", lambda *_args, **_kwargs: session)
+    monkeypatch.setattr(routes, "_resolve_chat_workspace_with_recovery", lambda *_args: "/tmp")
+    monkeypatch.setattr(routes, "_read_profile_model_config", lambda *_args: (None, None, {}))
+    monkeypatch.setattr(
+        routes, "_resolve_compatible_session_model_state",
+        lambda model, provider, **_kwargs: (model, provider, False),
+    )
+    monkeypatch.setattr(routes, "_get_session_agent_lock", lambda _sid: _NoopLock())
+    starts = []
+    monkeypatch.setattr(routes, "_start_run", lambda *_args, **_kwargs: starts.append(True))
+
+    result = routes.start_session_turn(
+        "parent-session", "delegate result", source="process_wakeup",
+        delegation_id="deleg-crash",
+    )
+
+    assert result["_status"] == 409
+    assert result["error"] == "delegation_acceptance_pending"
+    assert starts == []
+    assert session.delegation_acceptances["deleg-crash"].get("stream_id") is None
+    assert session.active_stream_id == "human-stream"
 
 

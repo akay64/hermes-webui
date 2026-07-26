@@ -21264,6 +21264,7 @@ def _prepare_chat_start_session_for_stream(
     stream_id: str,
     started_at: float | None = None,
     source: str = "webui",
+    delegation_id: str | None = None,
 ):
     """Persist chat-start state according to webui.session_save_mode.
 
@@ -21283,6 +21284,12 @@ def _prepare_chat_start_session_for_stream(
     s.pending_attachments = attachments
     s.pending_started_at = started_at if started_at is not None else time.time()
     s.pending_user_source = source
+    if delegation_id:
+        acceptances = dict(getattr(s, "delegation_acceptances", {}) or {})
+        entry = dict(acceptances.get(delegation_id) or {})
+        entry.update({"state": "started", "stream_id": stream_id, "started_at": time.time()})
+        acceptances[delegation_id] = entry
+        s.delegation_acceptances = acceptances
     current_title = getattr(s, "title", None)
     if _is_default_or_empty_session_title(current_title):
         provisional_title = _provisional_title_from_prompt(msg, current_title or "Untitled")
@@ -21452,6 +21459,7 @@ def _start_chat_stream_for_session(
     source: str = "webui",
     moa_config=None,
     external_runtime_owned: bool | None = None,
+    delegation_id: str | None = None,
 ):
     """Persist pending state, register an SSE channel, and start an agent turn."""
     if external_runtime_owned is None:
@@ -21532,6 +21540,7 @@ def _start_chat_stream_for_session(
                     model_provider=model_provider,
                     stream_id=stream_id,
                     source=source,
+                    delegation_id=delegation_id,
                 )
                 break
         if needs_stale_cleanup:
@@ -21693,6 +21702,7 @@ def _start_run(
     diag=None,
     moa_config=None,
     gateway_chat_enabled: bool | None = None,
+    delegation_id: str | None = None,
 ):
     """Shared start-run helper for /api/chat/start and start_session_turn.
 
@@ -21737,6 +21747,7 @@ def _start_run(
                 source=request.source or source,
                 moa_config=moa_config,
                 external_runtime_owned=gateway_chat_enabled,
+                delegation_id=delegation_id,
             )
 
         def _legacy_adapter_factory():
@@ -21759,7 +21770,7 @@ def _start_run(
                     provider=model_provider,
                     model=model,
                     source=source,
-                    metadata={"route": route},
+                    metadata={"route": route, "delegation_id": delegation_id},
                 )
             )
         except NotImplementedError as exc:
@@ -21780,6 +21791,7 @@ def _start_run(
         source=source,
         moa_config=moa_config,
         external_runtime_owned=gateway_chat_enabled,
+        delegation_id=delegation_id,
     )
 
 
@@ -21937,14 +21949,6 @@ def start_session_turn(
                 existing_stream = str(existing.get("stream_id") or "")
                 if existing_stream:
                     return {"stream_id": existing_stream, "_status": 200, "deduplicated": True}
-                active_stream = str(getattr(s, "active_stream_id", "") or "")
-                if active_stream and existing.get("state") == "reserved":
-                    existing["state"] = "started"
-                    existing["stream_id"] = active_stream
-                    acceptances[delegation_id] = existing
-                    s.delegation_acceptances = acceptances
-                    s.save(touch_updated_at=False)
-                    return {"stream_id": active_stream, "_status": 200, "deduplicated": True}
                 if now - float(existing.get("reserved_at") or now) < 30:
                     return {"error": "delegation_acceptance_pending", "_status": 409}
             acceptances[delegation_id] = {"state": "reserved", "reserved_at": now}
@@ -22074,6 +22078,7 @@ def start_session_turn(
         normalized_model=normalized_model,
         source=turn_source,
         route="start_session_turn",
+        delegation_id=delegation_id,
     )
     if delegation_id:
         status = int((resp or {}).get("_status", 200) or 200)

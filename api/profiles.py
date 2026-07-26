@@ -537,6 +537,39 @@ def get_active_hermes_home() -> Path:
     return _resolve_profile_home_for_name(get_active_profile_name())
 
 
+def resolve_delivery_hermes_home(value) -> Path:
+    """Validate a durable WebUI delivery-store identity against known profiles."""
+    candidate = Path(str(value or "")).expanduser().resolve()
+    if _is_isolated_profile_mode():
+        allowed = Path(_INITIAL_HERMES_HOME).expanduser().resolve()
+        if candidate != allowed:
+            raise ValueError("delivery store is outside this isolated WebUI profile")
+        return candidate
+    default_home = Path(_DEFAULT_HERMES_HOME).expanduser().resolve()
+    if candidate == default_home:
+        return candidate
+    profiles_root = (default_home / "profiles").resolve()
+    if candidate.parent != profiles_root or not _PROFILE_ID_RE.fullmatch(candidate.name):
+        raise ValueError("delivery store is not a valid Hermes profile home")
+    return candidate
+
+
+def delivery_profile_homes() -> list[Path]:
+    """Return existing profile stores eligible for first-class delivery restore."""
+    if _is_isolated_profile_mode():
+        return [Path(_INITIAL_HERMES_HOME).expanduser().resolve()]
+    default_home = Path(_DEFAULT_HERMES_HOME).expanduser().resolve()
+    homes = [default_home]
+    profiles_root = default_home / "profiles"
+    if profiles_root.is_dir():
+        homes.extend(
+            entry.resolve()
+            for entry in sorted(profiles_root.iterdir())
+            if entry.is_dir() and _PROFILE_ID_RE.fullmatch(entry.name)
+        )
+    return homes
+
+
 
 # ── Cron-call profile isolation (issue: Scheduled jobs ignored active profile) ─
 # `cron.jobs` reads HERMES_HOME from os.environ (process-global) at function-

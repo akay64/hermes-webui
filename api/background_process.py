@@ -58,7 +58,6 @@ from api.process_event_utils import (
     release_async_delegation_delivery,
     requeue_async_delegation_event,
     schedule_async_delegation_claim_retry,
-    active_hermes_home,
     webui_delivery_namespace,
 )
 
@@ -1739,6 +1738,7 @@ def start_drain_thread() -> bool:
     with _THREAD_LIFECYCLE_LOCK:
         if _DRAIN_THREAD is not None and _DRAIN_THREAD.is_alive():
             return False
+        _DRAIN_STOP.clear()
         try:
             recover_processes_for_webui()
         except Exception:
@@ -1754,17 +1754,37 @@ def start_drain_thread() -> bool:
             namespace = webui_delivery_namespace()
             register_completion_sink("webui", namespace, _WEBUI_DELEGATION_QUEUE.put_nowait)
             _WEBUI_DELEGATION_SINK_REGISTERED = True
-            restore_undelivered_completions(
-                _WEBUI_DELEGATION_QUEUE,
-                channel="webui",
-                namespace=namespace,
-                hermes_home=active_hermes_home(),
-            )
+            from api.profiles import delivery_profile_homes
+
+            def _restore_store(hermes_home):
+                try:
+                    restore_undelivered_completions(
+                        _WEBUI_DELEGATION_QUEUE,
+                        channel="webui",
+                        namespace=namespace,
+                        hermes_home=hermes_home,
+                    )
+                except Exception:
+                    logger.warning(
+                        "WebUI delegation restore failed for %s; retrying",
+                        hermes_home,
+                        exc_info=True,
+                    )
+                    if not _DRAIN_STOP.is_set():
+                        timer = threading.Timer(
+                            ASYNC_DELIVERY_ROUTING_RETRY_SECONDS,
+                            _restore_store,
+                            args=(hermes_home,),
+                        )
+                        timer.daemon = True
+                        timer.start()
+
+            for hermes_home in delivery_profile_homes():
+                _restore_store(hermes_home)
         except (ImportError, AttributeError):
             logger.info("Hermes core has no first-class WebUI delegation sink; using legacy queue")
         except Exception:
             logger.warning("WebUI delegation sink registration failed", exc_info=True)
-        _DRAIN_STOP.clear()
         _DRAIN_THREAD = threading.Thread(
             target=_drain_loop,
             name="hermes-webui-bg-task-complete-drain",
