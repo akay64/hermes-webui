@@ -232,6 +232,11 @@ class QuietHTTPServer(ThreadingHTTPServer):
             self._close_request_quietly(request)
             return
         if not self._overflow_reject_slots.acquire(blocking=False):
+            print(
+                "[warn] Overflow reject slots also exhausted (%d) — dropping connection"
+                % self.max_overflow_reject_workers,
+                flush=True,
+            )
             self._close_request_quietly(request)
             return
         try:
@@ -245,6 +250,11 @@ class QuietHTTPServer(ThreadingHTTPServer):
             self._close_request_quietly(request)
 
     def _reject_overflow_request_worker(self, request) -> None:
+        print(
+            "[warn] Overflow — all %d worker slots consumed, returning 503"
+            % self.max_request_workers,
+            flush=True,
+        )
         try:
             self._drain_request_input_nonblocking(request)
             try:
@@ -260,6 +270,20 @@ class QuietHTTPServer(ThreadingHTTPServer):
             self._overflow_reject_slots.release()
 
     def process_request(self, request, client_address):
+        # Log worker pool saturation at thresholds for early warning
+        used = self.max_request_workers - self._request_worker_slots._value
+        if used >= self.max_request_workers * 0.9:
+            print(
+                "[perf] Worker pool at %d/%d used (%.0f%%)"
+                % (used, self.max_request_workers, used / self.max_request_workers * 100),
+                flush=True,
+            )
+        elif used >= self.max_request_workers * 0.75:
+            print(
+                "[perf] Worker pool at %d/%d used (%.0f%%)"
+                % (used, self.max_request_workers, used / self.max_request_workers * 100),
+                flush=True,
+            )
         if not self._request_worker_slots.acquire(blocking=False):
             self._reject_overflow_request(request)
             return
@@ -719,6 +743,31 @@ def main() -> None:
     except (ValueError, OSError):
         # Not on the main thread (e.g. embedded/test harness); skip handler.
         logger.debug("Could not install SIGTERM handler", exc_info=True)
+
+    # Monitor thread: log when accept loop appears stalled
+    def _accept_loop_monitor():
+        _stall_warned = False
+        while not _shutdown_requested.is_set():
+            last = getattr(httpd, "accept_loop_last_request_at", 0)
+            elapsed = time.time() - last
+            if last > 0 and elapsed > 30:
+                if not _stall_warned:
+                    print(
+                        "[warn] Accept loop idle for %.0fs — may indicate main thread is stuck"
+                        % elapsed,
+                        flush=True,
+                    )
+                    _stall_warned = True
+            else:
+                _stall_warned = False
+            time.sleep(15)
+
+    _monitor = threading.Thread(
+        target=_accept_loop_monitor,
+        name="webui-accept-loop-monitor",
+        daemon=True,
+    )
+    _monitor.start()
 
     try:
         httpd.serve_forever()
