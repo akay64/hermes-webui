@@ -183,33 +183,63 @@ def test_editing_closed_long_message_opens_editor_and_cancel_restores_state(brow
     }
 
 
-def test_collapsed_intrinsic_height_includes_wrapped_image_attachments(browser_page):
+def test_narrow_attachment_layout_is_reserved_for_collapsed_and_expanded_rows(browser_page):
+    browser_page.set_viewport_size({"width": 390, "height": 800})
     result = browser_page.evaluate(
         """
         () => {
-          const attachments = [
+          document.body.style.margin = '0';
+          const style = document.createElement('style');
+          style.textContent = `
+            *, *::before, *::after { box-sizing: border-box; }
+            .message-column { width: calc(100% - 20px); margin: 0 10px; }
+            .msg-files { display: flex; flex-wrap: wrap; gap: 6px; padding-left: 30px; margin-bottom: 10px; }
+            .msg-media-img { display: inline-block; width: 120px; height: 90px; margin: 3px 4px 3px 0; border: 1px solid #000; }
+            .user-message-disclosure { display: block; }
+          `;
+          document.head.appendChild(style);
+          const root = document.createElement('div');
+          root.className = 'message-column';
+          root.innerHTML = `
+            <div class="msg-row" data-role="user" data-session-msg-idx="8"
+                 data-raw-text="${'x'.repeat(700)}" data-user-disclosure-long="1">
+              <div class="msg-files">
+                <img class="msg-media-img" alt="one">
+                <img class="msg-media-img" alt="two">
+                <img class="msg-media-img" alt="three">
+                <img class="msg-media-img" alt="four">
+                <img class="msg-media-img" alt="five">
+              </div>
+              <details class="user-message-disclosure">
+                <summary>preview</summary>
+                <div class="msg-body">full content</div>
+              </details>
+            </div>`;
+          document.body.appendChild(root);
+          const row = root.querySelector('.msg-row');
+          const files = root.querySelector('.msg-files');
+          const imageTops = [...root.querySelectorAll('.msg-media-img')]
+            .map(image => Math.round(image.getBoundingClientRect().top));
+          const imageRows = new Set(imageTops).size;
+          const attachmentHint = _estimateUserDisclosureAttachmentHeight([
             'one.png', 'two.png', 'three.png', 'four.png', 'five.png',
-          ];
-          const attachmentHint = _estimateUserDisclosureAttachmentHeight(attachments);
-          const withoutAttachments = _estimateUserDisclosureCollapsedHeight('x'.repeat(700), 0);
-          const row = document.createElement('div');
-          const details = document.createElement('details');
-          row.className = 'msg-row';
-          row.dataset.role = 'user';
-          row.dataset.sessionMsgIdx = '8';
-          row.dataset.rawText = 'x'.repeat(700);
-          row.dataset.userDisclosureLong = '1';
+          ]);
           row.dataset.userDisclosureAttachmentHeight = String(attachmentHint);
-          details.className = 'user-message-disclosure';
-          row.appendChild(details);
-          document.body.appendChild(row);
           _applyUserRowIntrinsicHeight(row, row.dataset.rawText);
-          const withAttachments = Number(row.style.containIntrinsicSize.match(/(\\d+)px$/)[1]);
-          row.remove();
-          return {attachmentHint, withoutAttachments, withAttachments};
+          const collapsedReserve = Number(row.style.containIntrinsicSize.match(/(\\d+)px$/)[1]);
+          const filesHeight = Math.round(files.getBoundingClientRect().height);
+          row.querySelector('details').open = true;
+          _applyUserRowIntrinsicHeight(row, row.dataset.rawText);
+          const expandedReserve = Number(row.style.containIntrinsicSize.match(/(\\d+)px$/)[1]);
+          root.remove();
+          style.remove();
+          return {attachmentHint, collapsedReserve, expandedReserve, filesHeight, imageRows};
         }
         """
     )
 
-    assert result["attachmentHint"] == 202
-    assert result["withAttachments"] >= result["withoutAttachments"] + result["attachmentHint"]
+    assert result["imageRows"] == 3
+    assert result["filesHeight"] > 202
+    assert result["attachmentHint"] >= result["filesHeight"]
+    assert result["collapsedReserve"] >= result["filesHeight"]
+    assert result["expandedReserve"] >= result["filesHeight"]

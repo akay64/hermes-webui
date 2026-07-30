@@ -1284,6 +1284,10 @@ const _userRowIntrinsicHeightBySessionIdx=Object.create(null);
 const USER_MESSAGE_COLLAPSE_CHAR_THRESHOLD=600;
 const USER_MESSAGE_COLLAPSE_LINE_THRESHOLD=8;
 const USER_MESSAGE_COLLAPSE_PREVIEW_MAX=180;
+const USER_DISCLOSURE_IMAGE_ROW_CAPACITY=2;
+const USER_DISCLOSURE_ATTACHMENT_ROW_GAP=6;
+const USER_DISCLOSURE_ATTACHMENT_BOTTOM_MARGIN=10;
+const USER_DISCLOSURE_IMAGE_ROW_HEIGHT=96;
 let _userDisclosureStateSid=null;
 const _userDisclosureState=new Map();
 const _userDisclosureHeights=new Map();
@@ -1356,18 +1360,28 @@ function _estimateUserDisclosureAttachmentHeight(attachments){
     if(typeof _mediaKindForName==='function'&&_mediaKindForName(String(label))==='image') imageCount++;
     else otherCount++;
   }
-  // .msg-files is a wrapping flex row. Reserve conservatively: thumbnails are
-  // 96px high including their margins, while badges/media controls can wrap
-  // into roughly 30px rows. The estimate is deliberately independent of the
+  // .msg-files is a wrapping flex row. Reserve conservatively for the narrow
+  // mobile layout: two 130px thumbnails fit in the smallest supported message
+  // column after the 30px left padding. Thumbnails are 96px high including
+  // margins, and every wrapped line contributes the CSS flex gap plus the
+  // container's bottom margin. The estimate is deliberately independent of
   // filename length because the renderer may not have painted yet.
-  const imageRows=Math.ceil(imageCount/4);
+  const imageRows=Math.ceil(imageCount/USER_DISCLOSURE_IMAGE_ROW_CAPACITY);
   const otherRows=Math.ceil(otherCount/3);
-  const attachmentRows=imageRows+otherRows;
-  return attachmentRows?imageRows*96+otherRows*30+10:0;
+  const imageHeight=imageRows*USER_DISCLOSURE_IMAGE_ROW_HEIGHT+
+    Math.max(0,imageRows-1)*USER_DISCLOSURE_ATTACHMENT_ROW_GAP;
+  const otherHeight=otherRows*30+
+    Math.max(0,otherRows-1)*USER_DISCLOSURE_ATTACHMENT_ROW_GAP;
+  return imageRows||otherRows
+    ? imageHeight+otherHeight+USER_DISCLOSURE_ATTACHMENT_BOTTOM_MARGIN
+    : 0;
 }
 function _estimateUserDisclosureCollapsedHeight(rawText, attachmentHeight){
   const textHeight=Math.max(96,_estimateUserRowIntrinsicHeight(_userDisclosurePreview(rawText)));
   return textHeight+Math.max(0,Number(attachmentHeight)||0);
+}
+function _estimateUserDisclosureExpandedHeight(rawText, attachmentHeight){
+  return _estimateUserRowIntrinsicHeight(rawText)+Math.max(0,Number(attachmentHeight)||0);
 }
 function _userDisclosureIsOpen(row){
   const details=row&&row.querySelector?row.querySelector('details.user-message-disclosure'):null;
@@ -1380,7 +1394,7 @@ function _rememberUserDisclosureHeight(row, height, expanded){
   if(!entry) return;
   const isExpanded=expanded===undefined?_userDisclosureIsOpen(row):!!expanded;
   const attachmentHeight=Number(row.dataset.userDisclosureAttachmentHeight)||0;
-  const estimate=isExpanded?_estimateUserRowIntrinsicHeight(rawText):_estimateUserDisclosureCollapsedHeight(rawText,attachmentHeight);
+  const estimate=isExpanded?_estimateUserDisclosureExpandedHeight(rawText,attachmentHeight):_estimateUserDisclosureCollapsedHeight(rawText,attachmentHeight);
   const value=Math.max(Math.round(height),estimate);
   if(isExpanded) entry.expandedHeight=Math.max(entry.expandedHeight||0,value);
   else entry.collapsedHeight=Math.max(entry.collapsedHeight||0,value);
@@ -1499,7 +1513,7 @@ function _applyUserRowIntrinsicHeight(row, rawText){
     const entry=_userDisclosureHeightEntry(row,text);
     const expanded=_userDisclosureIsOpen(row);
     const attachmentHeight=Number(row.dataset.userDisclosureAttachmentHeight)||0;
-    estimate=expanded?_estimateUserRowIntrinsicHeight(text):_estimateUserDisclosureCollapsedHeight(text,attachmentHeight);
+    estimate=expanded?_estimateUserDisclosureExpandedHeight(text,attachmentHeight):_estimateUserDisclosureCollapsedHeight(text,attachmentHeight);
     remembered=entry?(expanded?Number(entry.expandedHeight)||0:Number(entry.collapsedHeight)||0):0;
   }
   // Reserve the LARGER of the remembered measurement and the content estimate. A remembered
@@ -1620,8 +1634,10 @@ function _rememberRenderedUserRowIntrinsicHeights(){
     const inView=(r.bottom>=cRect.top-margin)&&(r.top<=cRect.bottom+margin);
     if(!inView) continue;
     const estimate=(typeof _estimateUserRowIntrinsicHeight==='function')
-      ? (row.dataset.userDisclosureLong==='1'&&!_userDisclosureIsOpen(row)
-        ? _estimateUserDisclosureCollapsedHeight(row.dataset.rawText,row.dataset.userDisclosureAttachmentHeight)
+      ? (row.dataset.userDisclosureLong==='1'
+        ? (_userDisclosureIsOpen(row)
+          ? _estimateUserDisclosureExpandedHeight(row.dataset.rawText,row.dataset.userDisclosureAttachmentHeight)
+          : _estimateUserDisclosureCollapsedHeight(row.dataset.rawText,row.dataset.userDisclosureAttachmentHeight))
         : _estimateUserRowIntrinsicHeight(row.dataset.rawText)) : 0;
     const h=Math.max(measured, estimate);
     if(!(h>0)) continue;
