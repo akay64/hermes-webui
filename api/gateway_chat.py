@@ -34,6 +34,11 @@ from api.config import (
 )
 from api.helpers import _redact_text, redact_session_data
 from api.models import clear_process_wakeup_pause, get_session, merge_session_messages_append_only
+from api.process_event_utils import (
+    build_active_turn_token,
+    find_active_turn_checkpoint,
+    stamp_message_source,
+)
 from api.run_journal import RunJournalWriter, bound_run_journal_snapshot_args
 
 logger = logging.getLogger(__name__)
@@ -796,6 +801,28 @@ def _clear_gateway_pending_state(session: Any, stream_id: str) -> None:
     session.save()
 
 
+def _build_gateway_success_context(
+    previous_messages: list,
+    existing_context: Any,
+    user_msg: dict,
+    assistant_msg: dict,
+    active_turn_token: str | None,
+) -> list:
+    """Reconcile the eager user checkpoint into one successful turn context."""
+    context = (
+        list(existing_context)
+        if isinstance(existing_context, list)
+        else list(previous_messages)
+    )
+    checkpoint = find_active_turn_checkpoint(previous_messages, active_turn_token)
+    if checkpoint is not None and find_active_turn_checkpoint(context, active_turn_token) is None:
+        context.append(dict(checkpoint))
+    if find_active_turn_checkpoint(context, active_turn_token) is None:
+        context.append(user_msg)
+    context.append(assistant_msg)
+    return context
+
+
 def _cleanup_gateway_pending_mirror(session_id: str) -> None:
     try:
         from api.route_approvals import (
@@ -1214,8 +1241,13 @@ def _run_gateway_chat_streaming(
             assistant_ts = now + 0.000001
             user_msg = {"role": "user", "content": str(msg_text or ""), "timestamp": now}
             pending_source = getattr(s, "pending_user_source", None) or "webui"
-            if pending_source != "webui":
-                user_msg["_source"] = pending_source
+            pending_started_at = getattr(s, "pending_started_at", None)
+            active_turn_token = build_active_turn_token(stream_id, pending_started_at)
+            stamp_message_source(
+                user_msg,
+                pending_source,
+                active_turn_token=active_turn_token,
+            )
             if attachments:
                 user_msg["attachments"] = list(attachments)
             assistant_msg = {"role": "assistant", "content": assistant_text, "timestamp": assistant_ts}
@@ -1223,7 +1255,13 @@ def _run_gateway_chat_streaming(
             if saved_reasoning:
                 assistant_msg["reasoning"] = saved_reasoning
             previous_messages = list(getattr(s, "messages", None) or [])
-            previous_context = list(getattr(s, "context_messages", None) or getattr(s, "messages", None) or [])
+            previous_context = _build_gateway_success_context(
+                previous_messages,
+                getattr(s, "context_messages", None),
+                user_msg,
+                assistant_msg,
+                active_turn_token,
+            )
             previous_process_wakeup_pause = dict(getattr(s, "process_wakeup_pause", {}) or {})
             # Stamp stable ids on the two new rows (shared with the display merge
             # below) so display and model-context copies share an id for the
@@ -1238,7 +1276,7 @@ def _run_gateway_chat_streaming(
                 )
             except Exception:
                 logger.debug("Failed to stamp stable ids on gateway turn rows", exc_info=True)
-            s.context_messages = previous_context + [user_msg, assistant_msg]
+            s.context_messages = previous_context
             try:
                 from api.streaming import _is_context_compression_marker
 
@@ -1263,6 +1301,18 @@ def _run_gateway_chat_streaming(
                     s.context_messages,
                     str(msg_text or ""),
                     source=pending_source,
+                    verification_nudge_provenance={
+                        "verification_nudge_seen": False,
+                        "active_turn_identity": {
+                            "token": active_turn_token,
+                            "text": getattr(s, "pending_user_message", None) or str(msg_text or ""),
+                            "timestamp": pending_started_at,
+                            "source": pending_source,
+                            "attachments": list(getattr(s, "pending_attachments", None) or attachments or []),
+                            "current_turn_user_idx": None,
+                            "turn_id": "gateway",
+                        },
+                    },
                 )
             except Exception:
                 logger.debug("Failed to merge gateway display transcript", exc_info=True)

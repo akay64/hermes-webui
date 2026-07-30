@@ -75,6 +75,7 @@ from api.process_event_utils import (
     requeue_async_delegation_event,
     schedule_async_delegation_claim_retry,
     find_active_turn_checkpoint,
+    message_matches_active_turn_fallback_identity,
     message_matches_active_turn_token,
     stamp_message_source,
 )
@@ -7106,6 +7107,8 @@ def _materialize_pending_user_turn_before_error(session) -> bool:
         existing = messages[-1]
         if not isinstance(existing, dict) or existing.get('role') != 'user':
             return False
+        if not message_matches_active_turn_fallback_identity(existing, active_turn_token):
+            return False
         existing_source = existing.get('_source') or 'webui'
         try:
             existing_ts = int(existing.get('timestamp'))
@@ -12101,7 +12104,14 @@ def cancel_stream(stream_id: str) -> bool:
                             # (e.g. prior reply was "ok", user now types "ok please continue")
                             # must NOT short-circuit synthesis — that would re-introduce
                             # the data-loss bug this guard is supposed to prevent.
-                            if isinstance(_last_content, str) and _last_ts >= _pending_started:
+                            if (
+                                isinstance(_last_content, str)
+                                and _last_ts >= _pending_started
+                                and message_matches_active_turn_fallback_identity(
+                                    _last_user,
+                                    _active_turn_token,
+                                )
+                            ):
                                 # Tolerate the workspace prefix the streaming thread prepends.
                                 if _pending_user == _last_content or _pending_user in _last_content:
                                     _already_persisted = True

@@ -45,6 +45,7 @@ from api.agent_sessions import (
 from api.process_event_utils import (
     build_active_turn_token,
     find_active_turn_checkpoint,
+    message_matches_active_turn_fallback_identity,
     stamp_message_source,
 )
 
@@ -881,6 +882,7 @@ def _append_recovered_context_projection(
                 recovered.get('timestamp'),
                 recovered.get('_source'),
                 recovered.get('attachments'),
+                active_turn_token=active_turn_token,
             ):
                 return
         else:
@@ -2320,8 +2322,18 @@ def _normalize_journal_recovery_text(value) -> str:
     return " ".join(str(value or "").split())
 
 
-def _message_matches_pending_checkpoint(message, pending_text, timestamp, source, attachments):
+def _message_matches_pending_checkpoint(
+    message,
+    pending_text,
+    timestamp,
+    source,
+    attachments,
+    *,
+    active_turn_token=None,
+):
     if not isinstance(message, dict) or message.get('role') != 'user':
+        return False
+    if not message_matches_active_turn_fallback_identity(message, active_turn_token):
         return False
     try:
         message_timestamp = int(message.get('timestamp'))
@@ -2337,8 +2349,10 @@ def _message_matches_pending_checkpoint(message, pending_text, timestamp, source
     )
 
 
-def _message_matches_pending_text(message, pending_text):
+def _message_matches_pending_text(message, pending_text, *, active_turn_token=None):
     if not isinstance(message, dict) or message.get('role') != 'user':
+        return False
+    if not message_matches_active_turn_fallback_identity(message, active_turn_token):
         return False
     return (
         _normalize_journal_recovery_text(message.get('content'))
@@ -2346,12 +2360,16 @@ def _message_matches_pending_text(message, pending_text):
     )
 
 
-def _latest_user_matches_pending_text(messages, pending_text):
+def _latest_user_matches_pending_text(messages, pending_text, *, active_turn_token=None):
     if not isinstance(messages, list) or not pending_text:
         return False
     for message in reversed(messages):
         if isinstance(message, dict) and message.get('role') == 'user':
-            return _message_matches_pending_text(message, pending_text)
+            return _message_matches_pending_text(
+                message,
+                pending_text,
+                active_turn_token=active_turn_token,
+            )
     return False
 
 
@@ -2821,12 +2839,17 @@ def _append_journaled_partial_output(
             return False
 
         pending_text = _normalize_journal_recovery_text(session.pending_user_message)
+        active_turn_token = build_active_turn_token(
+            getattr(session, 'active_stream_id', None),
+            getattr(session, 'pending_started_at', None),
+        )
         if pending_text and not _message_matches_pending_checkpoint(
             messages[owner_idx],
             session.pending_user_message,
             session.pending_started_at,
             session.pending_user_source,
             session.pending_attachments,
+            active_turn_token=active_turn_token,
         ):
             return False
 
@@ -2841,6 +2864,7 @@ def _append_journaled_partial_output(
                 session.pending_started_at,
                 session.pending_user_source,
                 session.pending_attachments,
+                active_turn_token=active_turn_token,
             )
             if candidate_matches_checkpoint and candidate.get('_recovered'):
                 continue
@@ -3427,15 +3451,26 @@ def _apply_core_sync_or_error_marker(
                 _recovered_ts,
                 session.pending_user_source,
                 session.pending_attachments,
+                active_turn_token=_active_turn_token,
             )
         )
         _tail_user_already_checkpointed = _already_checkpointed or _message_matches_pending_text(
             session.messages[-1],
             session.pending_user_message,
+            active_turn_token=_active_turn_token,
         )
         _pending_started_at = session.pending_started_at
         if _run_journal_terminal_state(session, _stream_id) == 'completed':
-            if not (_already_checkpointed or _latest_user_matches_pending_text(session.messages, session.pending_user_message)):
+            if _active_turn_checkpoint is not None:
+                _append_recovered_turn_to_context(session, _active_turn_checkpoint)
+            elif not (
+                _already_checkpointed
+                or _latest_user_matches_pending_text(
+                    session.messages,
+                    session.pending_user_message,
+                    active_turn_token=_active_turn_token,
+                )
+            ):
                 _append_recovered_pending_turn(
                     session,
                     timestamp=_recovered_ts,
@@ -3525,17 +3560,6 @@ def _apply_core_sync_or_error_marker(
             _recovered_ts = int(time.time())
             if isinstance(session.pending_started_at, (int, float)) and session.pending_started_at > 0:
                 _recovered_ts = int(session.pending_started_at)
-            _already_checkpointed = _message_matches_pending_checkpoint(
-                session.messages[-1] if session.messages else None,
-                session.pending_user_message,
-                _recovered_ts,
-                session.pending_user_source,
-                session.pending_attachments,
-            )
-            _tail_user_already_checkpointed = _already_checkpointed or _message_matches_pending_text(
-                session.messages[-1] if session.messages else None,
-                session.pending_user_message,
-            )
             _active_turn_token = build_active_turn_token(
                 _stream_id,
                 session.pending_started_at,
@@ -3543,6 +3567,19 @@ def _apply_core_sync_or_error_marker(
             _active_turn_checkpoint = find_active_turn_checkpoint(
                 session.messages,
                 _active_turn_token,
+            )
+            _already_checkpointed = _message_matches_pending_checkpoint(
+                session.messages[-1] if session.messages else None,
+                session.pending_user_message,
+                _recovered_ts,
+                session.pending_user_source,
+                session.pending_attachments,
+                active_turn_token=_active_turn_token,
+            )
+            _tail_user_already_checkpointed = _already_checkpointed or _message_matches_pending_text(
+                session.messages[-1] if session.messages else None,
+                session.pending_user_message,
+                active_turn_token=_active_turn_token,
             )
             _already_checkpointed = _already_checkpointed or _active_turn_checkpoint is not None
             if (

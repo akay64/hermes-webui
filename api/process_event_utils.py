@@ -198,6 +198,19 @@ def message_matches_active_turn_token(message: Any, token: Any) -> bool:
     )
 
 
+def message_matches_active_turn_fallback_identity(message: Any, expected_token: Any) -> bool:
+    """Return whether legacy matching may consider ``message`` for a turn.
+
+    Tokenless rows remain eligible for compatibility with sessions written
+    before active-turn identity metadata existed.  A non-empty token is
+    authoritative, however: it may only match the exact expected turn.
+    """
+    if not isinstance(message, dict):
+        return False
+    candidate_token = message.get("_active_turn_token")
+    return not candidate_token or bool(expected_token and candidate_token == expected_token)
+
+
 def find_active_turn_checkpoint(messages: Any, token: Any) -> dict | None:
     """Find the display user checkpoint carrying an exact active-turn token."""
     if not token or not isinstance(messages, list):
