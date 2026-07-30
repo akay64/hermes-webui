@@ -1,7 +1,12 @@
 """Regression tests for #2914 state.db tail replay after undo/retry/edit."""
 from __future__ import annotations
 
+import json
+import sqlite3
+from io import BytesIO
+from types import SimpleNamespace
 
+import api.helpers as helpers
 def _msg(role: str, content: str, ts: float, mid: str) -> dict:
     return {"id": mid, "role": role, "content": content, "timestamp": ts}
 
@@ -137,6 +142,129 @@ def test_truncate_endpoint_also_truncates_context_messages(monkeypatch, tmp_path
     assert [m["content"] for m in loaded.messages] == ["first", "reply first"]
     assert [m["content"] for m in loaded.context_messages] == ["first", "reply first"]
     assert loaded.truncation_watermark == 2.0
+
+
+def test_truncate_target_selector_uses_sidecar_index_and_reconciles_state_db(
+    monkeypatch, tmp_path
+):
+    """A selector must override a misleading merged-display keep_count."""
+    import api.models as models
+    import api.routes as routes
+    from api.models import Session
+    from api.session_db_bridge import replace_webui_active_transcript
+
+    session_dir = tmp_path / "sessions"
+    session_dir.mkdir(parents=True)
+    monkeypatch.setattr(models, "SESSION_DIR", session_dir)
+    monkeypatch.setattr(models, "SESSION_INDEX_FILE", session_dir / "_index.json")
+    models.SESSIONS.clear()
+    monkeypatch.setattr("api.config._evict_session_agent", lambda _sid: None)
+
+    messages = [
+        _msg("user", "before", 1.0, "u1"),
+        _msg("assistant", "reply", 2.0, "a1"),
+        _msg("user", "edit me", 3.0, "target"),
+        _msg("assistant", "cancelled", 4.0, "a2"),
+    ]
+    session = Session(
+        session_id="issue2914selector",
+        messages=messages,
+        context_messages=list(messages),
+    )
+    session.save()
+    replace_webui_active_transcript(session, messages)
+
+    body = {
+        "session_id": session.session_id,
+        "keep_count": 0,
+        "target_message": {
+            "id": "target",
+            "role": "user",
+            "timestamp": 3.0,
+            "content": "edit me",
+        },
+    }
+    body_bytes = json.dumps(body).encode()
+    monkeypatch.setattr(routes, "_check_csrf", lambda handler: True)
+    captured_response = {}
+    monkeypatch.setattr(
+        routes,
+        "j",
+        lambda handler, payload, status=200, extra_headers=None: captured_response.update(
+            payload=payload, status=status
+        ),
+    )
+    monkeypatch.setattr(helpers, "j", routes.j)
+    handler = SimpleNamespace(
+        headers={"Content-Length": str(len(body_bytes))},
+        rfile=BytesIO(body_bytes),
+    )
+
+    routes.handle_post(handler, SimpleNamespace(path="/api/session/truncate"))
+
+    assert captured_response["status"] == 200
+    assert captured_response["payload"]["ok"] is True
+    loaded = Session.load(session.session_id)
+    assert loaded is not None
+    assert [message["content"] for message in loaded.messages] == ["before", "reply"]
+    assert [message["content"] for message in loaded.context_messages] == ["before", "reply"]
+    assert loaded.truncation_watermark == 2.0
+
+    with sqlite3.connect(models._active_state_db_path()) as conn:
+        conn.row_factory = sqlite3.Row
+        active = conn.execute(
+            "SELECT content FROM messages WHERE session_id = ? AND active = 1 ORDER BY id",
+            (session.session_id,),
+        ).fetchall()
+    assert [row["content"] for row in active] == ["before", "reply"]
+
+
+def test_truncate_target_selector_conflict_does_not_mutate_session(monkeypatch, tmp_path):
+    import api.models as models
+    import api.routes as routes
+    from api.models import Session
+
+    session_dir = tmp_path / "sessions"
+    session_dir.mkdir(parents=True)
+    monkeypatch.setattr(models, "SESSION_DIR", session_dir)
+    monkeypatch.setattr(models, "SESSION_INDEX_FILE", session_dir / "_index.json")
+    models.SESSIONS.clear()
+
+    messages = [_msg("user", "keep", 1.0, "u1"), _msg("assistant", "reply", 2.0, "a1")]
+    session = Session(session_id="issue2914selectorconflict", messages=messages)
+    session.save()
+    body = {
+        "session_id": session.session_id,
+        "keep_count": 0,
+        "target_message": {
+            "id": "missing",
+            "role": "user",
+            "timestamp": 1.0,
+            "content": "keep",
+        },
+    }
+    body_bytes = json.dumps(body).encode()
+    monkeypatch.setattr(routes, "_check_csrf", lambda handler: True)
+    captured_response = {}
+    monkeypatch.setattr(
+        routes,
+        "j",
+        lambda handler, payload, status=200, extra_headers=None: captured_response.update(
+            payload=payload, status=status
+        ),
+    )
+    monkeypatch.setattr(helpers, "j", routes.j)
+    handler = SimpleNamespace(
+        headers={"Content-Length": str(len(body_bytes))},
+        rfile=BytesIO(body_bytes),
+    )
+
+    routes.handle_post(handler, SimpleNamespace(path="/api/session/truncate"))
+
+    assert captured_response["status"] == 409
+    loaded = Session.load(session.session_id)
+    assert loaded is not None
+    assert loaded.messages == messages
 
 
 def test_truncate_endpoint_compaction_leading_context_row(monkeypatch, tmp_path):

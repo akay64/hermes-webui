@@ -18991,17 +18991,42 @@ function ensureLiveWorklogShell(){
   return group;
 }
 
-// ── Edit + Regenerate ──
+// Edit + Regenerate
 
-// Edit/regenerate targets are rendered from the current message window, but the
-// truncate API expects an absolute position in the server transcript.  When the
-// current window starts at _oldestIdx, convert the absolute keep count back to a
-// local slice end after truncation instead of loading the entire history merely
-// to make Array#slice use the same coordinate system.
-function _loadedMessageSliceEndForKeepCount(absoluteKeepCount, windowOffset, windowTruncated){
-  const absolute=Math.max(0,Number(absoluteKeepCount)||0);
-  const offset=Math.max(0,Number(windowOffset)||0);
-  return windowTruncated?Math.max(0,absolute-offset):absolute;
+function _truncateTargetSelector(message){
+  if(!message || typeof message !== 'object') return null;
+  if(!message.role || message.timestamp == null || !Object.prototype.hasOwnProperty.call(message,'content')) return null;
+  const selector={role:message.role,timestamp:message.timestamp,content:message.content};
+  for(const key of ['id','message_id','_active_turn_token']){
+    if(message[key] !== undefined && message[key] !== null && message[key] !== '') selector[key]=message[key];
+  }
+  selector.source=message._source||message.source||'webui';
+  selector.attachments=Array.isArray(message.attachments)?message.attachments:[];
+  return selector;
+}
+
+function _truncateTargetValuesEqual(left,right){
+  try{return JSON.stringify(left)===JSON.stringify(right);}catch(_e){return left===right;}
+}
+
+function _truncateTargetMatchesMessage(message,selector){
+  if(!message || typeof message !== 'object' || !selector) return false;
+  for(const key of ['id','message_id']){
+    if(selector[key]===undefined) continue;
+    const candidate=message[key]!==undefined&&message[key]!==null?message[key]:(message.id??message.message_id);
+    if(candidate===undefined||String(candidate)!==String(selector[key])) return false;
+  }
+  if(selector._active_turn_token!==undefined&&message._active_turn_token!==selector._active_turn_token) return false;
+  if(message.role!==selector.role) return false;
+  if(Number(message.timestamp)!==Number(selector.timestamp)) return false;
+  if(!_truncateTargetValuesEqual(message.content,selector.content)) return false;
+  if((message._source||message.source||'webui')!==selector.source) return false;
+  return _truncateTargetValuesEqual(Array.isArray(message.attachments)?message.attachments:[],selector.attachments);
+}
+
+function _findLoadedTruncateTargetIndex(messages,selector){
+  if(!Array.isArray(messages)||!selector) return -1;
+  return messages.findIndex(message=>_truncateTargetMatchesMessage(message,selector));
 }
 
 function editMessage(btn) {
@@ -19077,22 +19102,20 @@ function autoResizeTextarea(ta) {
 async function submitEdit(msgIdx, newText) {
   if(!S.session || S.busy) return;
   const initialSid = S.session.session_id;
+  const targetSelector = _truncateTargetSelector(S.messages[msgIdx]);
+  if(!targetSelector) return;
   const initialWindowOffset = Math.max(0, Number(_oldestIdx)||0);
   const initialWindowTruncated = !!(
     typeof _messagesTruncated !== 'undefined' &&
     _messagesTruncated &&
     initialWindowOffset > 0
   );
-  const absoluteKeepCount = _oldestIdx + msgIdx;
+  const absoluteKeepCount = initialWindowOffset + msgIdx;
   // #5924: capture the deliberate-pick signal up front (pre-network), scoped to
   // initialSid — a non-default session model (vs profile default), which is
   // inference-free and survives the failed send's marker consumption. See
   // _deliberateSessionModelPick. null → no re-arm → server resolution runs.
   const _recoveryPick=_deliberateSessionModelPick(initialSid);
-  // The target row is necessarily inside S.messages, so a truncated window
-  // already contains everything needed to calculate the absolute keep_count.
-  // Full history is still used for non-paginated/legacy states where the local
-  // index cannot be safely translated into an absolute coordinate.
   if(!initialWindowTruncated&&typeof _ensureAllMessagesLoaded==='function'){
     await _ensureAllMessagesLoaded();
   }
@@ -19100,19 +19123,13 @@ async function submitEdit(msgIdx, newText) {
   try {
     await api('/api/session/truncate', {method:'POST', body:JSON.stringify({
       session_id: initialSid,
-      keep_count: absoluteKeepCount
+      keep_count: absoluteKeepCount,
+      target_message: targetSelector
     })});
     if(!S.session || S.session.session_id !== initialSid) return;
-    const currentWindowOffset=Math.max(0,Number(_oldestIdx)||0);
-    const currentWindowTruncated=!!(
-      typeof _messagesTruncated!=='undefined'&&
-      _messagesTruncated&&
-      currentWindowOffset>0
-    );
-    S.messages = S.messages.slice(
-      0,
-      _loadedMessageSliceEndForKeepCount(absoluteKeepCount,currentWindowOffset,currentWindowTruncated)
-    );
+    const targetLocalIdx=_findLoadedTruncateTargetIndex(S.messages,targetSelector);
+    if(targetLocalIdx<0){ setStatus(t('edit_failed') + 'Target message changed; refresh and try again.'); return; }
+    S.messages = S.messages.slice(0,targetLocalIdx);
     renderMessages();
     $('msg').value = newText;
     // #5924 (Facet 1 + Facet 4): edit-resubmit is a recovery send. Re-arm the
@@ -19129,14 +19146,16 @@ async function regenerateResponse(btn) {
   const row = btn.closest('[data-msg-idx]');
   if(!row) return;
   const assistantIdx = parseInt(row.dataset.msgIdx, 10);
+  const initialSid = S.session.session_id;
+  const targetSelector = _truncateTargetSelector(S.messages[assistantIdx]);
+  if(!targetSelector) return;
   const initialWindowOffset = Math.max(0, Number(_oldestIdx)||0);
   const initialWindowTruncated = !!(
     typeof _messagesTruncated !== 'undefined' &&
     _messagesTruncated &&
     initialWindowOffset > 0
   );
-  const absoluteKeepCount = _oldestIdx + assistantIdx;
-  const initialSid = S.session.session_id;
+  const absoluteKeepCount = initialWindowOffset + assistantIdx;
   let lastUserText = '';
   for(let i = assistantIdx - 1; i >= 0; i--) {
     const m = S.messages[i];
@@ -19150,19 +19169,13 @@ async function regenerateResponse(btn) {
   try {
     await api('/api/session/truncate', {method:'POST', body:JSON.stringify({
       session_id: initialSid,
-      keep_count: absoluteKeepCount
+      keep_count: absoluteKeepCount,
+      target_message: targetSelector
     })});
     if(!S.session || S.session.session_id !== initialSid) return;
-    const currentWindowOffset=Math.max(0,Number(_oldestIdx)||0);
-    const currentWindowTruncated=!!(
-      typeof _messagesTruncated!=='undefined'&&
-      _messagesTruncated&&
-      currentWindowOffset>0
-    );
-    S.messages = S.messages.slice(
-      0,
-      _loadedMessageSliceEndForKeepCount(absoluteKeepCount,currentWindowOffset,currentWindowTruncated)
-    );
+    const targetLocalIdx=_findLoadedTruncateTargetIndex(S.messages,targetSelector);
+    if(targetLocalIdx<0){ setStatus(t('regen_failed') + 'Target message changed; refresh and try again.'); return; }
+    S.messages = S.messages.slice(0,targetLocalIdx);
     renderMessages();
     $('msg').value = lastUserText;
     await send();

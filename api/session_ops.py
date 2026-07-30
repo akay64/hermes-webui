@@ -8,6 +8,7 @@ the hermes-agent repo.
 from __future__ import annotations
 import json
 import logging
+import math
 from bisect import bisect_left
 from typing import Any
 
@@ -100,6 +101,134 @@ def _truncation_watermark_for(messages):
         return float(history[-1].get('timestamp') or 0)
     except (AttributeError, TypeError, ValueError):
         return 0.0
+
+
+class TargetMessageResolutionError(ValueError):
+    """Base error for selector-based transcript truncation."""
+
+
+class TargetMessageSelectorError(TargetMessageResolutionError):
+    """The selector is malformed or lacks enough legacy identity fields."""
+
+
+class TargetMessageNotFoundError(TargetMessageResolutionError):
+    """The selector does not resolve against the current sidecar."""
+
+
+class TargetMessageAmbiguousError(TargetMessageResolutionError):
+    """The selector resolves to more than one sidecar row."""
+
+
+_TARGET_MESSAGE_ROLES = frozenset({"system", "user", "assistant", "tool"})
+
+
+def _target_scalar_present(selector: dict, key: str) -> bool:
+    return key in selector and selector[key] is not None and selector[key] != ""
+
+
+def _target_identity_value(value: Any) -> str:
+    if isinstance(value, bool) or not isinstance(value, (str, int, float)):
+        raise TargetMessageSelectorError("target_message identity fields must be scalar values")
+    normalized = str(value).strip()
+    if not normalized:
+        raise TargetMessageSelectorError("target_message identity fields must not be empty")
+    return normalized
+
+
+def _target_timestamp_equal(left: Any, right: Any) -> bool:
+    try:
+        return float(left) == float(right)
+    except (TypeError, ValueError):
+        return left == right
+
+
+def _target_source(row: dict) -> Any:
+    return row.get("_source") or row.get("source") or "webui"
+
+
+def _target_row_matches_selector(row: Any, selector: dict) -> bool:
+    if not isinstance(row, dict):
+        return False
+    for key in ("id", "message_id"):
+        if _target_scalar_present(selector, key):
+            wanted = _target_identity_value(selector[key])
+            if wanted not in {
+                str(row.get("id")) if row.get("id") is not None else "",
+                str(row.get("message_id")) if row.get("message_id") is not None else "",
+            }:
+                return False
+    if _target_scalar_present(selector, "_active_turn_token"):
+        if row.get("_active_turn_token") != selector["_active_turn_token"]:
+            return False
+    if "role" in selector and row.get("role") != selector["role"]:
+        return False
+    if "timestamp" in selector and not _target_timestamp_equal(
+        row.get("timestamp"), selector["timestamp"]
+    ):
+        return False
+    if "content" in selector and row.get("content") != selector["content"]:
+        return False
+    if "source" in selector and _target_source(row) != selector["source"]:
+        return False
+    if "attachments" in selector and list(row.get("attachments") or []) != selector["attachments"]:
+        return False
+    return True
+
+
+def resolve_truncate_target_index(messages: list | None, target_message: Any) -> int:
+    """Resolve a WebUI target selector to one mutable sidecar index.
+
+    IDs are authoritative when present, followed by an active-turn token. A
+    selector without either strong identity must carry the exact role,
+    timestamp, and content tuple; optional source and attachment metadata are
+    included in that fallback when supplied. Strong identities never weaken to
+    content matching when absent or conflicting.
+    """
+    if not isinstance(target_message, dict) or not target_message:
+        raise TargetMessageSelectorError("target_message must be a non-empty object")
+    selector = dict(target_message)
+
+    if "role" in selector and selector["role"] not in _TARGET_MESSAGE_ROLES:
+        raise TargetMessageSelectorError("target_message role is invalid")
+    if "timestamp" in selector:
+        try:
+            timestamp = float(selector["timestamp"])
+        except (TypeError, ValueError):
+            raise TargetMessageSelectorError("target_message timestamp is invalid") from None
+        if not math.isfinite(timestamp):
+            raise TargetMessageSelectorError("target_message timestamp is invalid")
+    if "attachments" in selector and not isinstance(selector["attachments"], list):
+        raise TargetMessageSelectorError("target_message attachments must be an array")
+
+    id_values = [
+        _target_identity_value(selector[key])
+        for key in ("id", "message_id")
+        if key in selector
+    ]
+    if len(id_values) == 2 and id_values[0] != id_values[1]:
+        raise TargetMessageSelectorError("target_message contains conflicting message IDs")
+    if "_active_turn_token" in selector:
+        token = selector["_active_turn_token"]
+        if not isinstance(token, str) or not token.strip():
+            raise TargetMessageSelectorError("target_message active-turn token is invalid")
+    has_strong_identity = bool(id_values) or "_active_turn_token" in selector
+    if not has_strong_identity:
+        required = ("role", "timestamp", "content")
+        if any(key not in selector for key in required):
+            raise TargetMessageSelectorError(
+                "target_message needs role, timestamp, and content without a strong identity"
+            )
+
+    candidates = [
+        index
+        for index, row in enumerate(messages or [])
+        if _target_row_matches_selector(row, selector)
+    ]
+    if not candidates:
+        raise TargetMessageNotFoundError("target_message no longer matches the active transcript")
+    if len(candidates) != 1:
+        raise TargetMessageAmbiguousError("target_message matches multiple active transcript rows")
+    return candidates[0]
 
 
 def truncate_context_for_display_keep(

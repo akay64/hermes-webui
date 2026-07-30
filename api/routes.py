@@ -15286,6 +15286,9 @@ def handle_post(handler, parsed) -> bool:
             return bad(handler, "Durable transcript replacement is not available in gateway mode.", 501)
         if body.get("keep_count") is None:
             return bad(handler, "Missing required field(s): keep_count")
+        has_target_message = "target_message" in body
+        if has_target_message and not isinstance(body.get("target_message"), dict):
+            return bad(handler, "target_message must be an object")
         try:
             s = get_session(body["session_id"])
         except KeyError:
@@ -15305,6 +15308,10 @@ def handle_post(handler, parsed) -> bool:
             return bad(handler, "keep_count must be non-negative")
         with _get_session_agent_lock(body["session_id"]):
             from api.session_ops import (
+                TargetMessageAmbiguousError,
+                TargetMessageNotFoundError,
+                TargetMessageSelectorError,
+                resolve_truncate_target_index,
                 truncate_context_for_display_keep,
                 truncate_session_at_keep,
             )
@@ -15317,6 +15324,16 @@ def handle_post(handler, parsed) -> bool:
                 return bad(handler, "Session not found", 404)
             full_messages = list(s.messages or [])
             original_context = list(getattr(s, "context_messages", None) or [])
+            if has_target_message:
+                try:
+                    keep = resolve_truncate_target_index(
+                        full_messages,
+                        body["target_message"],
+                    )
+                except TargetMessageSelectorError as exc:
+                    return bad(handler, str(exc), 400)
+                except (TargetMessageNotFoundError, TargetMessageAmbiguousError) as exc:
+                    return bad(handler, str(exc), 409)
             planned_messages = full_messages[:keep]
             planned_context = (
                 truncate_context_for_display_keep(original_context, full_messages, keep)
