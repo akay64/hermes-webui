@@ -367,6 +367,9 @@ Full list of environment variables:
 | `HERMES_WEBUI_PASSWORD` | *(unset)* | Set to enable password authentication |
 | `HERMES_WEBUI_CSP_CONNECT_EXTRA` | *(unset)* | Optional space-separated `http(s)://` or `ws(s)://` origins to append to the enforced and report-only CSP `connect-src` directives for trusted reverse-proxy, tunnel, or extension sidecar deployments |
 | `HERMES_WEBUI_SSE_CHUNKED` | *(unset)* | Set truthy (`1`/`true`/`yes`/`on`) to send SSE with `Transfer-Encoding: chunked`. Needed behind buffering reverse proxies (e.g. `jupyter-server-proxy`) that otherwise buffer the whole stream; harmless but unnecessary for directly-served deployments |
+| `HERMES_WEBUI_MAX_SSE_WORKERS` | `96` | Maximum concurrent SSE request workers. Must be between 1 and 96 so at least 32 of the 128 HTTP workers remain available for ordinary requests |
+| `HERMES_WEBUI_SSE_LEASE_SECONDS` | `600` | Base lifetime in seconds for persistent SSE connections before EventSource reconnects; accepted range 5–86400 |
+| `HERMES_WEBUI_SSE_LEASE_JITTER_SECONDS` | `300` | Random additional SSE lease time in seconds to spread reconnects; accepted range 0–3600 |
 | `HERMES_WEBUI_EXTENSION_DIR` | *(unset)* | Optional local directory served at `/extensions/`; must point to an existing directory before extension injection is enabled |
 | `HERMES_WEBUI_EXTENSION_MANIFEST` | *(unset)* | Optional relative JSON manifest inside `HERMES_WEBUI_EXTENSION_DIR` listing bundled scripts/styles to inject; see [WebUI Extensions](docs/EXTENSIONS.md) |
 | `HERMES_WEBUI_EXTENSION_SCRIPT_URLS` | *(unset)* | Optional comma-separated same-origin script URLs to inject; appended after manifest scripts; see [WebUI Extensions](docs/EXTENSIONS.md) |

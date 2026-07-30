@@ -14,7 +14,7 @@ from pathlib import Path
 import pytest
 
 from api.sse_chunked import end_sse_headers
-from server import QuietHTTPServer
+from server import QuietHTTPServer, _bounded_env_number
 
 
 def _free_port() -> int:
@@ -411,6 +411,43 @@ def _open_stream(port: int, path: str = "/sse") -> tuple[http.client.HTTPConnect
     conn = http.client.HTTPConnection("127.0.0.1", port, timeout=2)
     conn.request("GET", path)
     return conn, conn.getresponse()
+
+
+@pytest.mark.parametrize(
+    ("raw", "expected"),
+    [
+        ("48", 48),
+        ("0", 96),
+        ("97", 96),
+        ("not-a-number", 96),
+    ],
+)
+def test_sse_worker_env_override_is_bounded(monkeypatch, raw, expected):
+    monkeypatch.setenv("HERMES_WEBUI_MAX_SSE_WORKERS", raw)
+    assert _bounded_env_number(
+        "HERMES_WEBUI_MAX_SSE_WORKERS", 96,
+        minimum=1, maximum=96, cast=int,
+    ) == expected
+
+
+@pytest.mark.parametrize(
+    ("name", "raw", "default", "minimum", "maximum", "expected"),
+    [
+        ("HERMES_WEBUI_SSE_LEASE_SECONDS", "900", 600.0, 5.0, 86400.0, 900.0),
+        ("HERMES_WEBUI_SSE_LEASE_SECONDS", "4.9", 600.0, 5.0, 86400.0, 600.0),
+        ("HERMES_WEBUI_SSE_LEASE_SECONDS", "86401", 600.0, 5.0, 86400.0, 600.0),
+        ("HERMES_WEBUI_SSE_LEASE_SECONDS", "nan", 600.0, 5.0, 86400.0, 600.0),
+        ("HERMES_WEBUI_SSE_LEASE_JITTER_SECONDS", "0", 300.0, 0.0, 3600.0, 0.0),
+        ("HERMES_WEBUI_SSE_LEASE_JITTER_SECONDS", "3601", 300.0, 0.0, 3600.0, 300.0),
+    ],
+)
+def test_sse_lease_env_overrides_are_bounded(
+    monkeypatch, name, raw, default, minimum, maximum, expected,
+):
+    monkeypatch.setenv(name, raw)
+    assert _bounded_env_number(
+        name, default, minimum=minimum, maximum=maximum, cast=float,
+    ) == expected
 
 
 def _disconnect_stream(conn: http.client.HTTPConnection, response: http.client.HTTPResponse) -> None:

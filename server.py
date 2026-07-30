@@ -1,5 +1,6 @@
 """Hermes Web UI server entry point."""
 import logging
+import math
 import os
 import random
 import re
@@ -115,14 +116,42 @@ from api.updates import WEBUI_VERSION
 from api.crash_visibility import install_crash_visibility
 
 
+def _bounded_env_number(name: str, default, *, minimum, maximum, cast):
+    """Read a bounded numeric runtime override, falling back on invalid input."""
+    raw = os.getenv(name, "").strip()
+    if not raw:
+        return default
+    try:
+        value = cast(raw)
+    except (TypeError, ValueError):
+        logger.warning("Invalid %s=%r; using default %s", name, raw, default)
+        return default
+    if not math.isfinite(float(value)) or value < minimum or value > maximum:
+        logger.warning(
+            "%s=%r is outside the supported range %s..%s; using default %s",
+            name, raw, minimum, maximum, default,
+        )
+        return default
+    return value
+
+
 class QuietHTTPServer(ThreadingHTTPServer):
     """Custom HTTP server that silently handles common network errors."""
     daemon_threads = True
     request_queue_size = 64
     max_request_workers = 128
-    max_sse_workers = 96
-    sse_lease_seconds = 600
-    sse_lease_jitter_seconds = 300
+    max_sse_workers = _bounded_env_number(
+        "HERMES_WEBUI_MAX_SSE_WORKERS", 96,
+        minimum=1, maximum=max_request_workers - 32, cast=int,
+    )
+    sse_lease_seconds = _bounded_env_number(
+        "HERMES_WEBUI_SSE_LEASE_SECONDS", 600.0,
+        minimum=5.0, maximum=86400.0, cast=float,
+    )
+    sse_lease_jitter_seconds = _bounded_env_number(
+        "HERMES_WEBUI_SSE_LEASE_JITTER_SECONDS", 300.0,
+        minimum=0.0, maximum=3600.0, cast=float,
+    )
     max_overflow_reject_workers = 16
     _OVERFLOW_RESPONSE = (
         b"HTTP/1.1 503 Service Unavailable\r\n"

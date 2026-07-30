@@ -19786,22 +19786,21 @@ def _handle_approval_sse_stream(handler, parsed):
             initial_pending = dict(q_list)
             initial_count = 1
 
-    handler.send_response(200)
-    handler.send_header('Content-Type', 'text/event-stream; charset=utf-8')
-    handler.send_header('Cache-Control', 'no-cache')
-    handler.send_header('X-Accel-Buffering', 'no')
-    handler.send_header('Connection', 'close')
-    if not end_sse_headers(handler, lease=True):
-        _approval_sse_unsubscribe(sid, q)
-        return True
-    _sse_set_write_deadline(handler)  # Defect A: slow tab can't pin this thread
-
-    from api.streaming import _sse
-
-    # Push initial state immediately so the client doesn't miss anything.
-    _sse(handler, 'initial', {"pending": initial_pending, "pending_count": initial_count})
-
     try:
+        handler.send_response(200)
+        handler.send_header('Content-Type', 'text/event-stream; charset=utf-8')
+        handler.send_header('Cache-Control', 'no-cache')
+        handler.send_header('X-Accel-Buffering', 'no')
+        handler.send_header('Connection', 'close')
+        if not end_sse_headers(handler, lease=True):
+            return True
+        _sse_set_write_deadline(handler)  # Defect A: slow tab can't pin this thread
+
+        from api.streaming import _sse
+
+        # Push initial state immediately so the client doesn't miss anything.
+        _sse(handler, 'initial', {"pending": initial_pending, "pending_count": initial_count})
+
         while True:
             try:
                 payload = q.get(timeout=_SSE_HEARTBEAT_INTERVAL_SECONDS)
@@ -19890,22 +19889,21 @@ def _handle_clarify_sse_stream(handler, parsed):
                 initial_pending = dict(_legacy)
                 initial_count = 1
 
-    handler.send_response(200)
-    handler.send_header('Content-Type', 'text/event-stream; charset=utf-8')
-    handler.send_header('Cache-Control', 'no-cache')
-    handler.send_header('X-Accel-Buffering', 'no')
-    handler.send_header('Connection', 'close')
-    if not end_sse_headers(handler, lease=True):
-        clarify_sse_unsubscribe(sid, q)
-        return True
-    _sse_set_write_deadline(handler)  # Defect A: slow tab can't pin this thread
-
-    from api.streaming import _sse
-
-    # Push initial state immediately so the client doesn't miss anything.
-    _sse(handler, 'initial', {"pending": initial_pending, "pending_count": initial_count})
-
     try:
+        handler.send_response(200)
+        handler.send_header('Content-Type', 'text/event-stream; charset=utf-8')
+        handler.send_header('Cache-Control', 'no-cache')
+        handler.send_header('X-Accel-Buffering', 'no')
+        handler.send_header('Connection', 'close')
+        if not end_sse_headers(handler, lease=True):
+            return True
+        _sse_set_write_deadline(handler)  # Defect A: slow tab can't pin this thread
+
+        from api.streaming import _sse
+
+        # Push initial state immediately so the client doesn't miss anything.
+        _sse(handler, 'initial', {"pending": initial_pending, "pending_count": initial_count})
+
         while True:
             try:
                 payload = q.get(timeout=_SSE_HEARTBEAT_INTERVAL_SECONDS)
