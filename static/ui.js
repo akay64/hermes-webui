@@ -1281,6 +1281,13 @@ function _messageViewportIntersectsRenderedRow(){
 // either. Refreshed every measure pass, so edits self-heal. Desktop rests at
 // content-visibility:visible (intrinsic-size ignored) → inert there, zero behavior change.
 const _userRowIntrinsicHeightBySessionIdx=Object.create(null);
+const USER_MESSAGE_COLLAPSE_CHAR_THRESHOLD=600;
+const USER_MESSAGE_COLLAPSE_LINE_THRESHOLD=8;
+const USER_MESSAGE_COLLAPSE_PREVIEW_MAX=180;
+let _userDisclosureStateSid=null;
+const _userDisclosureState=new Map();
+const _userDisclosureHeights=new Map();
+let _userDisclosureDelegationRoot=null;
 // Cleared on session switch alongside _messageVirtualHeightCache (both are
 // per-session measured-height caches keyed by session-relative index). Without this,
 // keys collide across sessions — _messageSessionIndexForRawIdx = _messageSessionIndexBase()
@@ -1295,6 +1302,137 @@ function _rememberUserRowIntrinsicHeight(sessionMsgIdx, height){
   const key=Number(sessionMsgIdx);
   if(!Number.isFinite(key)||!(height>0)) return;
   _userRowIntrinsicHeightBySessionIdx[key]=Math.round(height);
+}
+function _isLongUserMessage(rawText){
+  const text=String(rawText||'');
+  return Array.from(text).length>=USER_MESSAGE_COLLAPSE_CHAR_THRESHOLD||
+    text.split('\n').length>=USER_MESSAGE_COLLAPSE_LINE_THRESHOLD;
+}
+function _userDisclosureFingerprint(rawText){
+  const text=String(rawText||'');
+  let hash=2166136261;
+  for(let i=0;i<text.length;i++){
+    hash^=text.charCodeAt(i);
+    hash=Math.imul(hash,16777619)>>>0;
+  }
+  return text.length.toString(36)+'-'+(hash>>>0).toString(36);
+}
+function _userDisclosureKey(sessionMsgIdx, rawText){
+  return String(Number(sessionMsgIdx))+'-'+_userDisclosureFingerprint(rawText);
+}
+function _userDisclosurePreview(rawText){
+  const text=String(rawText||'').replace(/\s+/g,' ').trim();
+  const chars=Array.from(text);
+  if(chars.length<=USER_MESSAGE_COLLAPSE_PREVIEW_MAX) return text;
+  const max=USER_MESSAGE_COLLAPSE_PREVIEW_MAX-1;
+  return chars.slice(0,max).join('')+'…';
+}
+function _userDisclosureHeightKey(row, rawText){
+  if(!row||!row.dataset) return '';
+  const sessionMsgIdx=Number(row.dataset.sessionMsgIdx);
+  if(!Number.isFinite(sessionMsgIdx)) return '';
+  const text=rawText!=null?String(rawText):String(row.dataset.rawText||'');
+  return _userDisclosureKey(sessionMsgIdx,text);
+}
+function _userDisclosureHeightEntry(row, rawText){
+  const key=_userDisclosureHeightKey(row,rawText);
+  if(!key) return null;
+  let entry=_userDisclosureHeights.get(key);
+  if(!entry){
+    entry={collapsedHeight:0,expandedHeight:0};
+    _userDisclosureHeights.set(key,entry);
+  }
+  return entry;
+}
+function _estimateUserDisclosureCollapsedHeight(rawText){
+  return Math.max(96,_estimateUserRowIntrinsicHeight(_userDisclosurePreview(rawText)));
+}
+function _userDisclosureIsOpen(row){
+  const details=row&&row.querySelector?row.querySelector('details.user-message-disclosure'):null;
+  return !!(details&&details.open);
+}
+function _rememberUserDisclosureHeight(row, height, expanded){
+  if(!row||!row.dataset||row.dataset.userDisclosureLong!=='1'||!(height>0)) return;
+  const rawText=String(row.dataset.rawText||'');
+  const entry=_userDisclosureHeightEntry(row,rawText);
+  if(!entry) return;
+  const isExpanded=expanded===undefined?_userDisclosureIsOpen(row):!!expanded;
+  const estimate=isExpanded?_estimateUserRowIntrinsicHeight(rawText):_estimateUserDisclosureCollapsedHeight(rawText);
+  const value=Math.max(Math.round(height),estimate);
+  if(isExpanded) entry.expandedHeight=Math.max(entry.expandedHeight||0,value);
+  else entry.collapsedHeight=Math.max(entry.collapsedHeight||0,value);
+}
+function _clearUserDisclosureIdentity(row){
+  if(!row||!row.dataset) return;
+  const oldKey=_userDisclosureKey(row.dataset.sessionMsgIdx,row.dataset.rawText||'');
+  _userDisclosureState.delete(oldKey);
+  _userDisclosureHeights.delete(oldKey);
+}
+function _clearUserDisclosureState(){
+  _userDisclosureState.clear();
+  _userDisclosureHeights.clear();
+}
+function _ensureUserDisclosureSession(sid){
+  if(sid===_userDisclosureStateSid) return;
+  _clearUserDisclosureState();
+  _userDisclosureStateSid=sid;
+}
+function _userDisclosureIdentity(row){
+  if(!row||!row.dataset) return null;
+  const sessionMsgIdx=Number(row.dataset.sessionMsgIdx);
+  if(!Number.isFinite(sessionMsgIdx)) return null;
+  const rawText=String(row.dataset.rawText||'');
+  const fingerprint=_userDisclosureFingerprint(rawText);
+  return {
+    sessionId:_userDisclosureStateSid,
+    sessionMsgIdx,
+    rawText,
+    fingerprint,
+    key:_userDisclosureKey(sessionMsgIdx,rawText),
+  };
+}
+function _syncUserDisclosureSummary(details){
+  if(!details||!details.querySelector) return;
+  const summary=details.querySelector(':scope > summary');
+  if(!summary) return;
+  const label=details.open
+    ? (typeof t==='function'?t('user_message_collapse'):'Collapse message')
+    : (typeof t==='function'?t('user_message_expand'):'Expand full message');
+  summary.setAttribute('aria-label',label);
+  summary.setAttribute('title',label);
+}
+function _refreshUserDisclosureHeight(details){
+  const row=details&&details.closest?details.closest('.msg-row[data-role="user"]'):null;
+  if(!row) return;
+  const measure=()=>{
+    const height=Math.max(0,row.getBoundingClientRect().height||0);
+    _rememberUserDisclosureHeight(row,height,!!details.open);
+    _applyUserRowIntrinsicHeight(row,row.dataset.rawText||'');
+    if(typeof _scheduleMessageVirtualizedRender==='function') _scheduleMessageVirtualizedRender(true);
+  };
+  if(typeof requestAnimationFrame==='function') requestAnimationFrame(measure);
+  else measure();
+}
+function _handleUserDisclosureToggle(event){
+  const details=event&&event.target&&event.target.matches&&event.target.matches('details.user-message-disclosure')
+    ? event.target
+    : null;
+  if(!details) return;
+  const row=details.closest?details.closest('.msg-row[data-role="user"]'):null;
+  const identity=_userDisclosureIdentity(row);
+  if(!identity||identity.sessionId!==_userDisclosureStateSid) return;
+  if(details.open) _userDisclosureState.set(identity.key,true);
+  else _userDisclosureState.delete(identity.key);
+  _syncUserDisclosureSummary(details);
+  _refreshUserDisclosureHeight(details);
+}
+function _rehydrateUserMessageDisclosures(root){
+  if(!root||!root.querySelectorAll) return;
+  if(_userDisclosureDelegationRoot!==root){
+    root.addEventListener('toggle',_handleUserDisclosureToggle,true);
+    _userDisclosureDelegationRoot=root;
+  }
+  for(const details of root.querySelectorAll('details.user-message-disclosure')) _syncUserDisclosureSummary(details);
 }
 function _estimateUserRowIntrinsicHeight(rawText){
   const t=String(rawText||'');
@@ -1325,8 +1463,16 @@ function _estimateUserRowIntrinsicHeight(rawText){
 function _applyUserRowIntrinsicHeight(row, rawText){
   if(!row||!row.style||!row.dataset) return;
   const key=Number(row.dataset.sessionMsgIdx);
-  const remembered=Number.isFinite(key)?Number(_userRowIntrinsicHeightBySessionIdx[key])||0:0;
-  const estimate=_estimateUserRowIntrinsicHeight(rawText!=null?rawText:row.dataset.rawText);
+  const text=rawText!=null?String(rawText):String(row.dataset.rawText||'');
+  const isDisclosureRow=row.dataset.userDisclosureLong==='1'&&_isLongUserMessage(text);
+  let remembered=Number.isFinite(key)?Number(_userRowIntrinsicHeightBySessionIdx[key])||0:0;
+  let estimate=_estimateUserRowIntrinsicHeight(text);
+  if(isDisclosureRow){
+    const entry=_userDisclosureHeightEntry(row,text);
+    const expanded=_userDisclosureIsOpen(row);
+    estimate=expanded?_estimateUserRowIntrinsicHeight(text):_estimateUserDisclosureCollapsedHeight(text);
+    remembered=entry?(expanded?Number(entry.expandedHeight)||0:Number(entry.collapsedHeight)||0):0;
+  }
   // Reserve the LARGER of the remembered measurement and the content estimate. A remembered
   // height can be a PARTIAL paint: a user row taller than the viewport that only ever had its
   // top slice scrolled through content-visibility:auto reports just the painted portion, not
@@ -1359,7 +1505,9 @@ function _measureMessageVirtualRow(inner, entry){
   if(totalHeight>0 && primary.dataset && primary.dataset.role==='user'
      && typeof _rememberUserRowIntrinsicHeight==='function'){
     _rememberUserRowIntrinsicHeight(primary.dataset.sessionMsgIdx, totalHeight);
+    if(typeof _rememberUserDisclosureHeight==='function') _rememberUserDisclosureHeight(primary,totalHeight);
     primary.style.containIntrinsicSize='auto '+Math.round(totalHeight)+'px';
+    if(typeof _applyUserRowIntrinsicHeight==='function') _applyUserRowIntrinsicHeight(primary,primary.dataset.rawText||'');
   }
   return totalHeight;
 }
@@ -1450,10 +1598,12 @@ function _rememberRenderedUserRowIntrinsicHeights(){
     const remembered=Number.isFinite(key)?Number(_userRowIntrinsicHeightBySessionIdx[key])||0:0;
     // Keep the tallest reserve seen — a row mid-collapse (rebuild transient) can report a
     // shrunken size; never let that overwrite a good taller remembered value.
+    if(typeof _rememberUserDisclosureHeight==='function') _rememberUserDisclosureHeight(row,measured);
     if(h>=remembered && typeof _rememberUserRowIntrinsicHeight==='function'){
       _rememberUserRowIntrinsicHeight(row.dataset.sessionMsgIdx, h);
       row.style.containIntrinsicSize='auto '+Math.round(h)+'px';
     }
+    if(typeof _applyUserRowIntrinsicHeight==='function') _applyUserRowIntrinsicHeight(row,row.dataset.rawText||'');
   }
 }
 function _scheduleMessageVirtualizedRender(force){
@@ -16080,6 +16230,7 @@ function renderMessages(options){
   const scrollSnapshot=(preserveScroll||_messageUserUnpinned)?_captureMessageScrollSnapshot():null;
   const inner=$('msgInner');
   const sid=S.session?S.session.session_id:null;
+  _ensureUserDisclosureSession(sid);
   if(!S.busy&&Array.isArray(S.messages)&&typeof _hydrateIdLinkedHistoricalToolScenes==='function'){
     const activityMode=typeof chatActivityMode==='function'?chatActivityMode():'compact_worklog';
     _hydrateIdLinkedHistoricalToolScenes(S.messages,{sessionId:sid,mode:activityMode});
@@ -16135,6 +16286,7 @@ function renderMessages(options){
       _sessionHtmlCacheSid=sid;
       _rehydrateTransparentStreamDom(inner);
       _rehydrateDeferredWorklogsFromCache(inner);
+      _rehydrateUserMessageDisclosures(inner);
       _wireMessageWindowLoadEarlierButton();
       if(typeof _applySessionNavigationPrefs==='function') _applySessionNavigationPrefs();
       // Pending selected-context annotations are transient composer UI and are
@@ -16647,19 +16799,31 @@ function renderMessages(options){
       let row=_msgNodeRecycleEnabled?_recycleStash.get(rawIdx):null;
       if(row&&(!row.classList.contains('msg-row')||row.classList.contains('assistant-turn'))) row=null;
       const newRawText=String(displayContent).trim();
-      const nextRowHtml=`${filesHtml}<div class="msg-body">${bodyHtml}</div>${footHtml}`;
+      const isLongDisclosure=_isLongUserMessage(newRawText);
+      const disclosureKey=_userDisclosureKey(_messageSessionIndexForRawIdx(rawIdx),newRawText);
+      const disclosureOpen=isLongDisclosure&&_userDisclosureState.get(disclosureKey)===true;
+      const disclosureExpandLabel=typeof t==='function'?t('user_message_expand'):'Expand full message';
+      const disclosureCollapseLabel=typeof t==='function'?t('user_message_collapse'):'Collapse message';
+      const disclosureHtml=isLongDisclosure
+        ? `<details class="user-message-disclosure"${disclosureOpen?' open':''}><summary class="user-message-disclosure-summary" aria-label="${esc(disclosureOpen?disclosureCollapseLabel:disclosureExpandLabel)}" title="${esc(disclosureOpen?disclosureCollapseLabel:disclosureExpandLabel)}"><span class="user-message-disclosure-preview">${esc(_userDisclosurePreview(newRawText))}</span><span class="sr-only">${esc(disclosureOpen?disclosureCollapseLabel:disclosureExpandLabel)}</span></summary><div class="msg-body user-message-disclosure-body">${bodyHtml}</div></details>`
+        : `<div class="msg-body">${bodyHtml}</div>`;
+      const nextRowHtml=`${filesHtml}${disclosureHtml}${footHtml}`;
       if(row){
+        const previousRawText=row.dataset.rawText;
+        const previousSessionMsgIdx=row.dataset.sessionMsgIdx;
+        const nextSessionMsgIdx=String(_messageSessionIndexForRawIdx(rawIdx));
+        if(previousRawText!==newRawText||previousSessionMsgIdx!==nextSessionMsgIdx) _clearUserDisclosureIdentity(row);
         row.className='msg-row';
         row.id=_userMessageDomId(rawIdx);
         row.dataset.msgIdx=rawIdx;
-        row.dataset.sessionMsgIdx=_messageSessionIndexForRawIdx(rawIdx);
+        row.dataset.sessionMsgIdx=nextSessionMsgIdx;
         row.dataset.messageAnchorKey=_messageViewportAnchorKeyForMessage(m);
         row.dataset.role='user';
+        row.dataset.rawText=newRawText;
+        row.dataset.userDisclosureFingerprint=_userDisclosureFingerprint(newRawText);
+        row.dataset.userDisclosureLong=isLongDisclosure?'1':'0';
         delete row.dataset.editing;
-        if(row.dataset.rawText!==newRawText||row.innerHTML!==nextRowHtml){
-          row.dataset.rawText=newRawText;
-          row.innerHTML=nextRowHtml;
-        }
+        if(previousRawText!==newRawText||row.innerHTML!==nextRowHtml) row.innerHTML=nextRowHtml;
       }else{
         row=document.createElement('div');
         row.className='msg-row';
@@ -16669,6 +16833,8 @@ function renderMessages(options){
         row.dataset.messageAnchorKey=_messageViewportAnchorKeyForMessage(m);
         row.dataset.role='user';
         row.dataset.rawText=newRawText;
+        row.dataset.userDisclosureFingerprint=_userDisclosureFingerprint(newRawText);
+        row.dataset.userDisclosureLong=isLongDisclosure?'1':'0';
         row.innerHTML=nextRowHtml;
       }
       // Reserve this user row's real off-screen height up front so a wipe-and-rebuild
@@ -17677,6 +17843,8 @@ function renderMessages(options){
   }
   // Apply persisted playback speed after media nodes are rendered.
   if(typeof _applyMediaPlaybackPreferences==='function') _applyMediaPlaybackPreferences(inner);
+  // Rehydrate native user-message disclosures after normal rendering and recycled-row replacement.
+  _rehydrateUserMessageDisclosures(inner);
   // Populate session cache so switching back here skips a full rebuild.
   _sessionHtmlCacheSid=sid;
   // Skip caching while the just-settled keep-open token is armed: that render

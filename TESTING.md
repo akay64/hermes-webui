@@ -15,6 +15,26 @@
 
 ---
 
+## Long user-message disclosure manual check
+
+Use a session containing user messages that are just below and above the
+collapse boundaries: 599 characters, 600 characters, seven explicit lines, and
+eight explicit lines.
+
+Expected behavior:
+
+- Messages below both boundaries render normally.
+- Messages at or above either boundary start collapsed with a visible preview.
+- Activating the native disclosure with mouse, keyboard, or touch reveals the
+  complete message and keeps the existing footer actions available.
+- Same-session rerenders and transcript scrolling do not lose an expanded row.
+- Opening and closing a long row does not leave a blank virtualized region or
+  move the reader unexpectedly.
+- Switching sessions clears the in-memory expansion state; returning to a
+  session or refreshing the browser has no persistence guarantee.
+- Verify desktop, narrow, and mobile widths, including long Unicode and fenced
+  code messages.
+
 ## Static JS runtime lint (brick-class regression guard)
 
 Some JS bugs throw a `TypeError`/`ReferenceError` only when a specific function
