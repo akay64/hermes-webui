@@ -1003,7 +1003,7 @@ def test_session_sse_stream_unsubscribes_on_header_write_failure():
     try_ix = body.find("try:", sub_ix)
     # SSE handlers finish their headers via end_sse_headers() (api/sse_chunked),
     # which is exactly handler.end_headers() unless chunked framing is opted in.
-    end_headers_ix = body.find("end_sse_headers(handler)", sub_ix)
+    end_headers_ix = body.find("end_sse_headers(handler", sub_ix)
     finally_ix = body.find("finally:", sub_ix)
     unsub_ix = body.find("ch.unsubscribe(q)", finally_ix if finally_ix != -1 else sub_ix)
 

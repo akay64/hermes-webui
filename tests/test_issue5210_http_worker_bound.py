@@ -13,6 +13,7 @@ from pathlib import Path
 
 import pytest
 
+from api.sse_chunked import end_sse_headers
 from server import QuietHTTPServer
 
 
@@ -55,6 +56,16 @@ def _wait_for_worker_slot_release(server: _ObservedQuietHTTPServer, *, timeout: 
             return
         time.sleep(0.01)
     raise AssertionError("timed out waiting for worker slot release")
+
+
+def _wait_for_sse_count(server: _ObservedQuietHTTPServer, expected: int, *, timeout: float = 2.0) -> None:
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        _, current, _, _ = server._worker_snapshot()
+        if current == expected:
+            return
+        time.sleep(0.01)
+    raise AssertionError(f"timed out waiting for SSE count {expected}; got {server._worker_snapshot()[1]}")
 
 
 def _request(port: int, path: str, *, use_ssl: bool = False, timeout: float = 2.0) -> tuple[int, dict[str, str], bytes]:
@@ -168,6 +179,41 @@ class _GateHandler(BaseHTTPRequestHandler):
             self._send_ok()
             return
         self.send_error(404)
+
+
+class _SSEGateHandler(BaseHTTPRequestHandler):
+    protocol_version = "HTTP/1.1"
+
+    def log_message(self, format, *args) -> None:  # pragma: no cover - noise suppression
+        pass
+
+    def _send_ok(self) -> None:
+        body = b"ok"
+        self.send_response(200)
+        self.send_header("Connection", "close")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+    def do_GET(self):  # noqa: N802
+        if self.path == "/fast":
+            self._send_ok()
+            return
+        if self.path not in {"/sse", "/sse-setup-error"}:
+            self.send_error(404)
+            return
+        self.send_response(200)
+        self.send_header("Content-Type", "text/event-stream")
+        self.send_header("Cache-Control", "no-cache")
+        if not end_sse_headers(self, lease=True):
+            return
+        if self.path == "/sse-setup-error":
+            raise RuntimeError("failure after SSE admission")
+        release_event = self.server.release_event  # type: ignore[attr-defined]
+        while not release_event.is_set():
+            self.wfile.write(b": heartbeat\n\n")
+            self.wfile.flush()
+            time.sleep(0.02)
 
 
 class _ServerRunner:
@@ -359,3 +405,91 @@ def test_tls_overflow_does_not_force_accept_loop_handshake(monkeypatch, tmp_path
         hold_thread.join(timeout=5)
         assert "error" not in hold_result, hold_result.get("error")
         assert hold_result["value"][0] == 200
+
+
+def _open_stream(port: int, path: str = "/sse") -> tuple[http.client.HTTPConnection, http.client.HTTPResponse]:
+    conn = http.client.HTTPConnection("127.0.0.1", port, timeout=2)
+    conn.request("GET", path)
+    return conn, conn.getresponse()
+
+
+def _disconnect_stream(conn: http.client.HTTPConnection, response: http.client.HTTPResponse) -> None:
+    sock = getattr(getattr(getattr(response, "fp", None), "raw", None), "_sock", None)
+    if sock is not None:
+        try:
+            sock.shutdown(socket.SHUT_RDWR)
+        except OSError:
+            pass
+    conn.close()
+
+
+def test_sse_subcap_preserves_ordinary_request_capacity(monkeypatch):
+    monkeypatch.setattr(QuietHTTPServer, "max_request_workers", 3, raising=False)
+    monkeypatch.setattr(QuietHTTPServer, "max_sse_workers", 2, raising=False)
+    monkeypatch.setattr(QuietHTTPServer, "sse_lease_seconds", 30, raising=False)
+    monkeypatch.setattr(QuietHTTPServer, "sse_lease_jitter_seconds", 0, raising=False)
+
+    with _ServerRunner(_SSEGateHandler) as srv:
+        streams = [_open_stream(srv.port) for _ in range(2)]
+        try:
+            assert [response.status for _, response in streams] == [200, 200]
+            _wait_for_sse_count(srv.httpd, 2)
+            status, headers, body = _request(srv.port, "/sse")
+            assert status == 503
+            assert headers["Retry-After"] == "2"
+            assert body == b""
+            status, _, body = _request(srv.port, "/fast")
+            assert status == 200
+            assert body == b"ok"
+            _wait_for_sse_count(srv.httpd, 2)
+        finally:
+            for conn, _ in streams:
+                conn.close()
+
+
+def test_sse_admission_recovers_after_disconnect_and_setup_error(monkeypatch):
+    monkeypatch.setattr(QuietHTTPServer, "max_sse_workers", 1, raising=False)
+    monkeypatch.setattr(QuietHTTPServer, "sse_lease_seconds", 30, raising=False)
+    monkeypatch.setattr(QuietHTTPServer, "sse_lease_jitter_seconds", 0, raising=False)
+
+    with _ServerRunner(_SSEGateHandler) as srv:
+        conn, response = _open_stream(srv.port)
+        assert response.status == 200
+        _wait_for_sse_count(srv.httpd, 1)
+        _disconnect_stream(conn, response)
+        _wait_for_sse_count(srv.httpd, 0)
+        error_conn, error_response = _open_stream(srv.port, "/sse-setup-error")
+        assert error_response.status == 200
+        error_conn.close()
+        _wait_for_sse_count(srv.httpd, 0)
+        replacement, replacement_response = _open_stream(srv.port)
+        try:
+            assert replacement_response.status == 200
+            _wait_for_sse_count(srv.httpd, 1)
+        finally:
+            replacement.close()
+
+
+def test_writable_sse_lease_releases_slot_once_and_allows_reconnect(monkeypatch):
+    monkeypatch.setattr(QuietHTTPServer, "max_sse_workers", 1, raising=False)
+    monkeypatch.setattr(QuietHTTPServer, "sse_lease_seconds", 0.1, raising=False)
+    monkeypatch.setattr(QuietHTTPServer, "sse_lease_jitter_seconds", 0, raising=False)
+
+    with _ServerRunner(_SSEGateHandler) as srv:
+        conn, response = _open_stream(srv.port)
+        assert response.status == 200
+        _wait_for_sse_count(srv.httpd, 1)
+        # Keep the client socket open and readable: lease expiry, not a broken
+        # connection, must retire the handler and release exactly one SSE slot.
+        _wait_for_sse_count(srv.httpd, 0)
+        conn.close()
+        replacement, replacement_response = _open_stream(srv.port)
+        try:
+            assert replacement_response.status == 200
+            _wait_for_sse_count(srv.httpd, 1)
+            _wait_for_sse_count(srv.httpd, 0)
+            assert srv.httpd._sse_worker_slots.acquire(blocking=False)
+            assert not srv.httpd._sse_worker_slots.acquire(blocking=False)
+            srv.httpd._sse_worker_slots.release()
+        finally:
+            replacement.close()

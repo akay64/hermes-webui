@@ -1096,7 +1096,8 @@ def _handle_events_sse_stream(handler, parsed):
     handler.send_header("Cache-Control", "no-cache")
     handler.send_header("X-Accel-Buffering", "no")
     handler.send_header("Connection", "close")
-    end_sse_headers(handler)
+    if not end_sse_headers(handler, lease=True):
+        return True
 
     # Send an initial frame so the client knows the connection is open
     # and learns the current cursor (in case the server already had a

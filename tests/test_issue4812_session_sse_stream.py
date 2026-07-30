@@ -314,7 +314,7 @@ def test_session_route_arms_deadline_immediately_after_headers(monkeypatch):
     monkeypatch.setattr(routes, "_session_id_visible_to_request_profile", lambda *_args, **_kwargs: True)
     monkeypatch.setattr(routes, "get_session", lambda sid, metadata_only=False: SimpleNamespace(session_id=sid, compact=lambda **_kwargs: {}))
     monkeypatch.setattr(routes, "_active_run_stream_for_session", lambda *_args, **_kwargs: None)
-    monkeypatch.setattr(routes, "end_sse_headers", lambda _handler: calls.append("headers"))
+    monkeypatch.setattr(routes, "end_sse_headers", lambda _handler, **_kwargs: calls.append("headers") or True)
     monkeypatch.setattr(routes, "_sse_set_write_deadline", lambda _handler: calls.append("deadline"))
 
     routes._handle_session_sse_stream_for_session(_FakeHandler(), urlparse("/api/sessions/session_1/events"), "session_1")

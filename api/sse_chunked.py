@@ -21,6 +21,7 @@ Usage: in an SSE handler, replace ``handler.end_headers()`` with
 """
 
 import os
+import time
 
 _TRUTHY = {"1", "true", "yes", "on"}
 
@@ -50,7 +51,30 @@ class _ChunkedSSEWriter:
         return getattr(self._raw, name)
 
 
-def end_sse_headers(handler):
+class _LeasedSSEWriter:
+    """End an SSE response once its planned connection lease expires."""
+
+    def __init__(self, raw, deadline: float):
+        self._raw = raw
+        self._deadline = deadline
+
+    def _check_lease(self):
+        if self._deadline and time.monotonic() >= self._deadline:
+            raise TimeoutError("SSE connection lease expired")
+
+    def write(self, data):
+        self._check_lease()
+        return self._raw.write(data)
+
+    def flush(self):
+        self._check_lease()
+        return self._raw.flush()
+
+    def __getattr__(self, name):
+        return getattr(self._raw, name)
+
+
+def end_sse_headers(handler, *, lease: bool = False) -> bool:
     """Finish SSE response headers, optionally enabling chunked framing.
 
     When ``HERMES_WEBUI_SSE_CHUNKED`` is set, send ``Transfer-Encoding: chunked``
@@ -59,9 +83,32 @@ def end_sse_headers(handler):
     preserved. Chunked + ``Connection: close`` is legal and unambiguous on the
     HTTP/1.1 responses these handlers emit.
     """
-    if chunked_sse_enabled():
-        handler.send_header("Transfer-Encoding", "chunked")
+    server = getattr(handler, "server", None)
+    admit_sse = getattr(server, "admit_sse", None)
+    deadline = admit_sse(handler, lease=lease) if admit_sse is not None else 0.0
+    if deadline is None:
+        # send_response()/send_header() only buffer bytes until end_headers(), so
+        # admission can still replace the pending 200 without corrupting the wire.
+        handler._headers_buffer = []
+        handler.send_response(503)
+        handler.send_header("Retry-After", "2")
+        handler.send_header("Connection", "close")
+        handler.send_header("Content-Length", "0")
         handler.end_headers()
-        handler.wfile = _ChunkedSSEWriter(handler.wfile)
-    else:
-        handler.end_headers()
+        handler.close_connection = True
+        return False
+    try:
+        if chunked_sse_enabled():
+            handler.send_header("Transfer-Encoding", "chunked")
+            handler.end_headers()
+            handler.wfile = _ChunkedSSEWriter(handler.wfile)
+        else:
+            handler.end_headers()
+        if deadline:
+            handler.wfile = _LeasedSSEWriter(handler.wfile, deadline)
+        return True
+    except Exception:
+        release_sse = getattr(server, "_release_sse_for_current_request", None)
+        if release_sse is not None:
+            release_sse()
+        raise

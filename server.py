@@ -1,6 +1,7 @@
 """Hermes Web UI server entry point."""
 import logging
 import os
+import random
 import re
 import signal
 import socket
@@ -119,6 +120,9 @@ class QuietHTTPServer(ThreadingHTTPServer):
     daemon_threads = True
     request_queue_size = 64
     max_request_workers = 128
+    max_sse_workers = 96
+    sse_lease_seconds = 600
+    sse_lease_jitter_seconds = 300
     max_overflow_reject_workers = 16
     _OVERFLOW_RESPONSE = (
         b"HTTP/1.1 503 Service Unavailable\r\n"
@@ -134,7 +138,13 @@ class QuietHTTPServer(ThreadingHTTPServer):
         self.ssl_context: object | None = None
         super().__init__(*args, **kwargs)
         self._request_worker_slots = threading.BoundedSemaphore(self.max_request_workers)
+        self._sse_worker_slots = threading.BoundedSemaphore(self.max_sse_workers)
         self._overflow_reject_slots = threading.BoundedSemaphore(self.max_overflow_reject_workers)
+        self._worker_state_lock = threading.Lock()
+        self._workers_used = 0
+        self._sse_workers_used = 0
+        self._active_requests = {}
+        self._next_request_id = 1
         self.accept_loop_requests_total = 0
         self.accept_loop_last_request_at = 0.0
 
@@ -180,10 +190,79 @@ class QuietHTTPServer(ThreadingHTTPServer):
         return tls_request, client_address
 
     def _handle_request_noblock(self):
-        """Record accept-loop progress before dispatching a request handler."""
+        """Maintain the public health counters without inferring idle-loop stalls."""
         self.accept_loop_requests_total += 1
         self.accept_loop_last_request_at = time.time()
-        return super()._handle_request_noblock()
+        return super()._handle_request_noblock()  # type: ignore[misc]
+
+    @staticmethod
+    def _normalise_route(path: str) -> str:
+        route = urlparse(str(path or "")).path or "/"
+        return "/".join(
+            ":id" if len(part) > 20 or re.fullmatch(r"[0-9a-fA-F-]{24,}", part) else part
+            for part in route.split("/")
+        )
+
+    def note_request_handler(self, handler) -> None:
+        with self._worker_state_lock:
+            state = self._active_requests.get(threading.get_ident())
+            if state is not None:
+                state["route"] = self._normalise_route(getattr(handler, "path", ""))
+
+    def admit_sse(self, handler, *, lease: bool) -> float | None:
+        """Reserve SSE capacity for this request and return its lease deadline."""
+        if not self._sse_worker_slots.acquire(blocking=False):
+            self._log_worker_state(prefix="[warn] SSE capacity exhausted;")
+            return None
+        now = time.monotonic()
+        with self._worker_state_lock:
+            state = self._active_requests.get(threading.get_ident())
+            if state is None or state["sse"]:
+                self._sse_worker_slots.release()
+                return None
+            state["route"] = self._normalise_route(getattr(handler, "path", ""))
+            state["sse"] = True
+            state["sse_started_at"] = now
+            self._sse_workers_used += 1
+        if not lease:
+            return 0.0
+        jitter = random.uniform(0, max(0, self.sse_lease_jitter_seconds))
+        return now + max(0, self.sse_lease_seconds) + jitter
+
+    def _release_sse_for_current_request(self) -> bool:
+        with self._worker_state_lock:
+            state = self._active_requests.get(threading.get_ident())
+            if state is None or not state["sse"]:
+                return False
+            state["sse"] = False
+            state["sse_started_at"] = None
+            self._sse_workers_used -= 1
+        self._sse_worker_slots.release()
+        return True
+
+    def _worker_snapshot(self) -> tuple[int, int, dict[str, int], float]:
+        now = time.monotonic()
+        with self._worker_state_lock:
+            routes = {}
+            oldest_sse = 0.0
+            for state in self._active_requests.values():
+                route = state["route"]
+                routes[route] = routes.get(route, 0) + 1
+                if state["sse"] and state["sse_started_at"] is not None:
+                    oldest_sse = max(oldest_sse, now - state["sse_started_at"])
+            return self._workers_used, self._sse_workers_used, routes, oldest_sse
+
+    def _log_worker_state(self, prefix: str = "[perf]") -> None:
+        used, sse_used, routes, oldest_sse = self._worker_snapshot()
+        route_summary = ",".join(
+            f"{route}:{count}" for route, count in sorted(routes.items(), key=lambda item: (-item[1], item[0]))[:8]
+        ) or "none"
+        print(
+            f"{prefix} worker_pool used={used}/{self.max_request_workers} "
+            f"sse={sse_used}/{self.max_sse_workers} ordinary={used - sse_used} "
+            f"routes={route_summary} oldest_sse_seconds={oldest_sse:.0f}",
+            flush=True,
+        )
 
     def _close_request_quietly(self, request) -> None:
         try:
@@ -270,34 +349,45 @@ class QuietHTTPServer(ThreadingHTTPServer):
             self._overflow_reject_slots.release()
 
     def process_request(self, request, client_address):
-        # Log worker pool saturation at thresholds for early warning
-        used = self.max_request_workers - self._request_worker_slots._value
+        used, _, _, _ = self._worker_snapshot()
         if used >= self.max_request_workers * 0.9:
-            print(
-                "[perf] Worker pool at %d/%d used (%.0f%%)"
-                % (used, self.max_request_workers, used / self.max_request_workers * 100),
-                flush=True,
-            )
+            self._log_worker_state()
         elif used >= self.max_request_workers * 0.75:
-            print(
-                "[perf] Worker pool at %d/%d used (%.0f%%)"
-                % (used, self.max_request_workers, used / self.max_request_workers * 100),
-                flush=True,
-            )
+            self._log_worker_state()
         if not self._request_worker_slots.acquire(blocking=False):
+            self._log_worker_state(prefix="[warn]")
             self._reject_overflow_request(request)
             return
+        with self._worker_state_lock:
+            self._workers_used += 1
         try:
             return super().process_request(request, client_address)
         except Exception:
+            with self._worker_state_lock:
+                self._workers_used -= 1
             self._request_worker_slots.release()
             self._close_request_quietly(request)
             raise
 
     def process_request_thread(self, request, client_address):
+        with self._worker_state_lock:
+            request_id = self._next_request_id
+            self._next_request_id += 1
+            self._active_requests[threading.get_ident()] = {
+                "request_id": request_id,
+                "route": "(parsing)",
+                "started_at": time.monotonic(),
+                "client": str(client_address[0]) if client_address else "-",
+                "sse": False,
+                "sse_started_at": None,
+            }
         try:
             return super().process_request_thread(request, client_address)
         finally:
+            self._release_sse_for_current_request()
+            with self._worker_state_lock:
+                self._active_requests.pop(threading.get_ident(), None)
+                self._workers_used -= 1
             self._request_worker_slots.release()
 
     def handle_error(self, request, client_address):
@@ -397,6 +487,10 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_GET(self) -> None:
         self._req_t0 = time.time(); reset_trusted_auth_request_state(self)
+        try:
+            self.server.note_request_handler(self)  # type: ignore[attr-defined]
+        except AttributeError:
+            pass
         cookie_profile = get_profile_cookie(self)
         if cookie_profile:
             set_request_profile(cookie_profile)
@@ -422,6 +516,10 @@ class Handler(BaseHTTPRequestHandler):
 
     def _handle_write(self, route_func) -> None:
         self._req_t0 = time.time(); reset_trusted_auth_request_state(self)
+        try:
+            self.server.note_request_handler(self)  # type: ignore[attr-defined]
+        except AttributeError:
+            pass
         cookie_profile = get_profile_cookie(self)
         if cookie_profile:
             set_request_profile(cookie_profile)
@@ -744,30 +842,6 @@ def main() -> None:
         # Not on the main thread (e.g. embedded/test harness); skip handler.
         logger.debug("Could not install SIGTERM handler", exc_info=True)
 
-    # Monitor thread: log when accept loop appears stalled
-    def _accept_loop_monitor():
-        _stall_warned = False
-        while not _shutdown_requested.is_set():
-            last = getattr(httpd, "accept_loop_last_request_at", 0)
-            elapsed = time.time() - last
-            if last > 0 and elapsed > 30:
-                if not _stall_warned:
-                    print(
-                        "[warn] Accept loop idle for %.0fs — may indicate main thread is stuck"
-                        % elapsed,
-                        flush=True,
-                    )
-                    _stall_warned = True
-            else:
-                _stall_warned = False
-            time.sleep(15)
-
-    _monitor = threading.Thread(
-        target=_accept_loop_monitor,
-        name="webui-accept-loop-monitor",
-        daemon=True,
-    )
-    _monitor.start()
 
     try:
         httpd.serve_forever()
