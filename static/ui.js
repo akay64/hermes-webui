@@ -1332,7 +1332,8 @@ function _userDisclosureHeightKey(row, rawText){
   const sessionMsgIdx=Number(row.dataset.sessionMsgIdx);
   if(!Number.isFinite(sessionMsgIdx)) return '';
   const text=rawText!=null?String(rawText):String(row.dataset.rawText||'');
-  return _userDisclosureKey(sessionMsgIdx,text);
+  const attachmentHeight=Number(row.dataset.userDisclosureAttachmentHeight)||0;
+  return _userDisclosureKey(sessionMsgIdx,text)+'-a'+String(attachmentHeight);
 }
 function _userDisclosureHeightEntry(row, rawText){
   const key=_userDisclosureHeightKey(row,rawText);
@@ -1344,8 +1345,29 @@ function _userDisclosureHeightEntry(row, rawText){
   }
   return entry;
 }
-function _estimateUserDisclosureCollapsedHeight(rawText){
-  return Math.max(96,_estimateUserRowIntrinsicHeight(_userDisclosurePreview(rawText)));
+function _estimateUserDisclosureAttachmentHeight(attachments){
+  if(!Array.isArray(attachments)||!attachments.length) return 0;
+  let imageCount=0;
+  let otherCount=0;
+  for(const attachment of attachments){
+    const label=typeof attachment==='string'
+      ? attachment
+      : (attachment&&(attachment.name||attachment.filename||attachment.path))||'';
+    if(typeof _mediaKindForName==='function'&&_mediaKindForName(String(label))==='image') imageCount++;
+    else otherCount++;
+  }
+  // .msg-files is a wrapping flex row. Reserve conservatively: thumbnails are
+  // 96px high including their margins, while badges/media controls can wrap
+  // into roughly 30px rows. The estimate is deliberately independent of the
+  // filename length because the renderer may not have painted yet.
+  const imageRows=Math.ceil(imageCount/4);
+  const otherRows=Math.ceil(otherCount/3);
+  const attachmentRows=imageRows+otherRows;
+  return attachmentRows?imageRows*96+otherRows*30+10:0;
+}
+function _estimateUserDisclosureCollapsedHeight(rawText, attachmentHeight){
+  const textHeight=Math.max(96,_estimateUserRowIntrinsicHeight(_userDisclosurePreview(rawText)));
+  return textHeight+Math.max(0,Number(attachmentHeight)||0);
 }
 function _userDisclosureIsOpen(row){
   const details=row&&row.querySelector?row.querySelector('details.user-message-disclosure'):null;
@@ -1357,7 +1379,8 @@ function _rememberUserDisclosureHeight(row, height, expanded){
   const entry=_userDisclosureHeightEntry(row,rawText);
   if(!entry) return;
   const isExpanded=expanded===undefined?_userDisclosureIsOpen(row):!!expanded;
-  const estimate=isExpanded?_estimateUserRowIntrinsicHeight(rawText):_estimateUserDisclosureCollapsedHeight(rawText);
+  const attachmentHeight=Number(row.dataset.userDisclosureAttachmentHeight)||0;
+  const estimate=isExpanded?_estimateUserRowIntrinsicHeight(rawText):_estimateUserDisclosureCollapsedHeight(rawText,attachmentHeight);
   const value=Math.max(Math.round(height),estimate);
   if(isExpanded) entry.expandedHeight=Math.max(entry.expandedHeight||0,value);
   else entry.collapsedHeight=Math.max(entry.collapsedHeight||0,value);
@@ -1366,7 +1389,12 @@ function _clearUserDisclosureIdentity(row){
   if(!row||!row.dataset) return;
   const oldKey=_userDisclosureKey(row.dataset.sessionMsgIdx,row.dataset.rawText||'');
   _userDisclosureState.delete(oldKey);
-  _userDisclosureHeights.delete(oldKey);
+  _clearUserDisclosureHeightIdentity(row);
+}
+function _clearUserDisclosureHeightIdentity(row){
+  if(!row||!row.dataset) return;
+  const oldHeightKey=_userDisclosureHeightKey(row,row.dataset.rawText||'');
+  _userDisclosureHeights.delete(oldHeightKey);
 }
 function _clearUserDisclosureState(){
   _userDisclosureState.clear();
@@ -1470,7 +1498,8 @@ function _applyUserRowIntrinsicHeight(row, rawText){
   if(isDisclosureRow){
     const entry=_userDisclosureHeightEntry(row,text);
     const expanded=_userDisclosureIsOpen(row);
-    estimate=expanded?_estimateUserRowIntrinsicHeight(text):_estimateUserDisclosureCollapsedHeight(text);
+    const attachmentHeight=Number(row.dataset.userDisclosureAttachmentHeight)||0;
+    estimate=expanded?_estimateUserRowIntrinsicHeight(text):_estimateUserDisclosureCollapsedHeight(text,attachmentHeight);
     remembered=entry?(expanded?Number(entry.expandedHeight)||0:Number(entry.collapsedHeight)||0):0;
   }
   // Reserve the LARGER of the remembered measurement and the content estimate. A remembered
@@ -1591,7 +1620,9 @@ function _rememberRenderedUserRowIntrinsicHeights(){
     const inView=(r.bottom>=cRect.top-margin)&&(r.top<=cRect.bottom+margin);
     if(!inView) continue;
     const estimate=(typeof _estimateUserRowIntrinsicHeight==='function')
-      ? _estimateUserRowIntrinsicHeight(row.dataset.rawText) : 0;
+      ? (row.dataset.userDisclosureLong==='1'&&!_userDisclosureIsOpen(row)
+        ? _estimateUserDisclosureCollapsedHeight(row.dataset.rawText,row.dataset.userDisclosureAttachmentHeight)
+        : _estimateUserRowIntrinsicHeight(row.dataset.rawText)) : 0;
     const h=Math.max(measured, estimate);
     if(!(h>0)) continue;
     const key=Number(row.dataset.sessionMsgIdx);
@@ -16799,6 +16830,7 @@ function renderMessages(options){
       let row=_msgNodeRecycleEnabled?_recycleStash.get(rawIdx):null;
       if(row&&(!row.classList.contains('msg-row')||row.classList.contains('assistant-turn'))) row=null;
       const newRawText=String(displayContent).trim();
+      const disclosureAttachmentHeight=_estimateUserDisclosureAttachmentHeight(m.attachments);
       const isLongDisclosure=_isLongUserMessage(newRawText);
       const disclosureKey=_userDisclosureKey(_messageSessionIndexForRawIdx(rawIdx),newRawText);
       const disclosureOpen=isLongDisclosure&&_userDisclosureState.get(disclosureKey)===true;
@@ -16811,8 +16843,10 @@ function renderMessages(options){
       if(row){
         const previousRawText=row.dataset.rawText;
         const previousSessionMsgIdx=row.dataset.sessionMsgIdx;
+        const previousAttachmentHeight=row.dataset.userDisclosureAttachmentHeight;
         const nextSessionMsgIdx=String(_messageSessionIndexForRawIdx(rawIdx));
         if(previousRawText!==newRawText||previousSessionMsgIdx!==nextSessionMsgIdx) _clearUserDisclosureIdentity(row);
+        else if(previousAttachmentHeight!==String(disclosureAttachmentHeight)) _clearUserDisclosureHeightIdentity(row);
         row.className='msg-row';
         row.id=_userMessageDomId(rawIdx);
         row.dataset.msgIdx=rawIdx;
@@ -16822,6 +16856,7 @@ function renderMessages(options){
         row.dataset.rawText=newRawText;
         row.dataset.userDisclosureFingerprint=_userDisclosureFingerprint(newRawText);
         row.dataset.userDisclosureLong=isLongDisclosure?'1':'0';
+        row.dataset.userDisclosureAttachmentHeight=String(disclosureAttachmentHeight);
         delete row.dataset.editing;
         if(previousRawText!==newRawText||row.innerHTML!==nextRowHtml) row.innerHTML=nextRowHtml;
       }else{
@@ -16835,6 +16870,7 @@ function renderMessages(options){
         row.dataset.rawText=newRawText;
         row.dataset.userDisclosureFingerprint=_userDisclosureFingerprint(newRawText);
         row.dataset.userDisclosureLong=isLongDisclosure?'1':'0';
+        row.dataset.userDisclosureAttachmentHeight=String(disclosureAttachmentHeight);
         row.innerHTML=nextRowHtml;
       }
       // Reserve this user row's real off-screen height up front so a wipe-and-rebuild
@@ -18942,6 +18978,15 @@ function editMessage(btn) {
   const originalText = row.dataset.rawText || '';
   const body = row.querySelector('.msg-body');
   if(!body || row.dataset.editing) return;
+  const disclosure=body.closest('details.user-message-disclosure');
+  const disclosureWasOpen=!!(disclosure&&disclosure.open);
+  if(disclosure&&!disclosure.open){
+    disclosure.open=true;
+    const identity=_userDisclosureIdentity(row);
+    if(identity&&identity.sessionId===_userDisclosureStateSid) _userDisclosureState.set(identity.key,true);
+    _syncUserDisclosureSummary(disclosure);
+    _applyUserRowIntrinsicHeight(row,originalText);
+  }
   row.dataset.editing = '1';
 
   // Replace msg-body with an editable textarea
@@ -18964,20 +19009,30 @@ function editMessage(btn) {
     if(!newText) return;
     await submitEdit(msgIdx, newText);
   };
-  bar.querySelector('.msg-edit-cancel').onclick = () => cancelEdit(row, originalText, body);
+  bar.querySelector('.msg-edit-cancel').onclick = () => cancelEdit(row, originalText, body, disclosure, disclosureWasOpen);
 
   ta.addEventListener('keydown', e => {
     if(e.key==='Enter' && !e.shiftKey) { if(window._isImeEnter&&window._isImeEnter(e)) return; e.preventDefault(); bar.querySelector('.msg-edit-send').click(); }
-    if(e.key==='Escape') { e.preventDefault(); cancelEdit(row, originalText, body); }
+    if(e.key==='Escape') { e.preventDefault(); cancelEdit(row, originalText, body, disclosure, disclosureWasOpen); }
   });
 }
 
-function cancelEdit(row, originalText, originalBody) {
+function cancelEdit(row, originalText, originalBody, disclosure, disclosureWasOpen) {
   delete row.dataset.editing;
   const ta = row.querySelector('.msg-edit-area');
   const bar = row.querySelector('.msg-edit-bar');
   if(ta) ta.replaceWith(originalBody);
   if(bar) bar.remove();
+  if(disclosure){
+    disclosure.open=!!disclosureWasOpen;
+    const identity=_userDisclosureIdentity(row);
+    if(identity&&identity.sessionId===_userDisclosureStateSid){
+      if(disclosure.open) _userDisclosureState.set(identity.key,true);
+      else _userDisclosureState.delete(identity.key);
+    }
+    _syncUserDisclosureSummary(disclosure);
+    _applyUserRowIntrinsicHeight(row,row.dataset.rawText||originalText);
+  }
 }
 
 function autoResizeTextarea(ta) {

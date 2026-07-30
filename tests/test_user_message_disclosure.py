@@ -135,3 +135,81 @@ def test_disclosure_heights_keep_collapsed_and_expanded_measurements(browser_pag
     assert result["expandedMeasured"] == "auto 1800px"
     assert result["collapsedMeasured"] != result["expandedMeasured"]
     assert result["reopenedMeasured"] == "auto 1800px"
+
+
+def test_editing_closed_long_message_opens_editor_and_cancel_restores_state(browser_page):
+    result = browser_page.evaluate(
+        """
+        async () => {
+          const root = document.createElement('div');
+          root.innerHTML = `
+            <div class="msg-row" data-role="user" data-msg-idx="7"
+                 data-session-msg-idx="7" data-raw-text="${'x'.repeat(700)}"
+                 data-user-disclosure-long="1">
+              <details class="user-message-disclosure">
+                <summary>preview</summary>
+                <div class="msg-body user-message-disclosure-body">original content</div>
+              </details>
+              <div class="msg-foot"><button onclick="editMessage(this)">Edit</button></div>
+            </div>`;
+          document.body.appendChild(root);
+          _ensureUserDisclosureSession('browser-edit-session');
+          _rehydrateUserMessageDisclosures(root);
+          const row = root.querySelector('.msg-row');
+          const editButton = root.querySelector('button');
+          editMessage(editButton);
+          const details = row.querySelector('details');
+          const textarea = row.querySelector('.msg-edit-area');
+          const bar = row.querySelector('.msg-edit-bar');
+          await new Promise(requestAnimationFrame);
+          const editorVisible = details.open && textarea && bar &&
+            textarea.getClientRects().length > 0 &&
+            bar.getClientRects().length > 0;
+          const editorFocused = document.activeElement === textarea;
+          bar.querySelector('.msg-edit-cancel').click();
+          const restored = !details.open &&
+            row.querySelector('.msg-body').textContent === 'original content' &&
+            !row.querySelector('.msg-edit-area') && !row.dataset.editing;
+          root.remove();
+          return {editorVisible, editorFocused, restored};
+        }
+        """
+    )
+
+    assert result == {
+        "editorVisible": True,
+        "editorFocused": True,
+        "restored": True,
+    }
+
+
+def test_collapsed_intrinsic_height_includes_wrapped_image_attachments(browser_page):
+    result = browser_page.evaluate(
+        """
+        () => {
+          const attachments = [
+            'one.png', 'two.png', 'three.png', 'four.png', 'five.png',
+          ];
+          const attachmentHint = _estimateUserDisclosureAttachmentHeight(attachments);
+          const withoutAttachments = _estimateUserDisclosureCollapsedHeight('x'.repeat(700), 0);
+          const row = document.createElement('div');
+          const details = document.createElement('details');
+          row.className = 'msg-row';
+          row.dataset.role = 'user';
+          row.dataset.sessionMsgIdx = '8';
+          row.dataset.rawText = 'x'.repeat(700);
+          row.dataset.userDisclosureLong = '1';
+          row.dataset.userDisclosureAttachmentHeight = String(attachmentHint);
+          details.className = 'user-message-disclosure';
+          row.appendChild(details);
+          document.body.appendChild(row);
+          _applyUserRowIntrinsicHeight(row, row.dataset.rawText);
+          const withAttachments = Number(row.style.containIntrinsicSize.match(/(\\d+)px$/)[1]);
+          row.remove();
+          return {attachmentHint, withoutAttachments, withAttachments};
+        }
+        """
+    )
+
+    assert result["attachmentHint"] == 202
+    assert result["withAttachments"] >= result["withoutAttachments"] + result["attachmentHint"]
