@@ -182,6 +182,12 @@ function executeCommand(text){
   return {noEcho:!!cmd.noEcho};
 }
 
+function _getSkillMatchRank(name,q){
+  if(name===q)return 0;
+  if(name.startsWith(q))return 1;
+  if(name.includes(q))return 2;
+  return -1;
+}
 function getMatchingCommands(prefix){
   const q=prefix.toLowerCase();
   const matches=COMMANDS.filter(c=>c.name.startsWith(q)).map(c=>({...c,source:'builtin'}));
@@ -227,8 +233,15 @@ function getMatchingCommands(prefix){
       seen.add(bundle.name);
     }
   }
+  const skillMatches=[];
   for(const skill of _skillCommandCache){
-    if(!skill.name.startsWith(q)||seen.has(skill.name)||reserved.has(skill.name))continue;
+    if(seen.has(skill.name)||reserved.has(skill.name))continue;
+    const rank=_getSkillMatchRank(skill.name,q);
+    if(rank<0)continue;
+    skillMatches.push({skill,rank});
+  }
+  skillMatches.sort((a,b)=>a.rank-b.rank||a.skill.name.localeCompare(b.skill.name));
+  for(const {skill} of skillMatches){
     matches.push(skill);
     seen.add(skill.name);
   }

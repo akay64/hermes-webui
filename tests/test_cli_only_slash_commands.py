@@ -89,10 +89,12 @@ def test_browser_cli_only_response_explains_server_side_browser_tools():
     assert "`/browser` itself only works in `hermes chat`" in response
 
 
-def _run_commands_js(script_body: str) -> dict:
+def _run_commands_js(script_body: str, skills_response=None, skills_error=False) -> dict:
     script = textwrap.dedent(
         f"""
         const vm = require('vm');
+        const skillsResponse = {json.dumps(skills_response)};
+        const skillsFailure = {str(skills_error).lower()};
         const ctx = {{
           console,
           localStorage: {{ getItem(){{return null;}}, setItem(){{}}, removeItem(){{}} }},
@@ -194,8 +196,11 @@ def _run_commands_js(script_body: str) -> dict:
                 }}
               ]
             }};
-            if (path === '/api/skills') return {{
-              skills: [
+            if (path === '/api/skills') {{
+              if (skillsFailure) throw new Error('skills unavailable');
+              if (skillsResponse !== null) return skillsResponse;
+              return {{
+                skills: [
                 {{
                   name: 'handoff',
                   description: 'Skill shortcut that should stay reachable via /use'
@@ -215,9 +220,26 @@ def _run_commands_js(script_body: str) -> dict:
                 {{
                   name: 'plugin review',
                   description: 'Plugin collisions should stay hidden from slash autocomplete'
+                }},
+                {{
+                  name: 'research',
+                  description: 'Exact skill match'
+                }},
+                {{
+                  name: 'research-tools',
+                  description: 'Prefix skill match'
+                }},
+                {{
+                  name: 'browser-web-research',
+                  description: 'Substring skill match'
+                }},
+                {{
+                  name: 'browser-cdp-launcher',
+                  description: 'CDP skill match'
                 }}
               ]
-            }};
+              }};
+            }}
             throw new Error('unexpected api path: ' + path);
           }}
         }};
@@ -240,6 +262,77 @@ def _run_commands_js(script_body: str) -> dict:
     finally:
         script_path.unlink(missing_ok=True)
     return json.loads(proc.stdout)
+
+
+def test_skill_autocomplete_matches_fragments_and_preserves_skill_metadata():
+    result = _run_commands_js(
+        """
+        await loadAgentCommandMetadata(true);
+        await loadBundleCommands(true);
+        await loadSkillCommands(true);
+        const ranked = await getSlashAutocompleteMatches('/research');
+        const webResearch = await getSlashAutocompleteMatches('/web-research');
+        const cdp = await getSlashAutocompleteMatches('/CDP');
+        const root = await getSlashAutocompleteMatches('/');
+        const unmatched = await getSlashAutocompleteMatches('/no-such-skill-fragment');
+        const rootSkill = root.find(item => item.name === 'browser-web-research');
+        return {
+          ranked_names: ranked.map(item => item.name),
+          ranked_sources: ranked.map(item => item.source),
+          ranked_descs: ranked.map(item => item.desc),
+          web_research_names: webResearch.map(item => item.name),
+          cdp_names: cdp.map(item => item.name),
+          root_has_builtin: root.some(item => item.name === 'help' && item.source === 'builtin'),
+          root_skill_name: rootSkill && rootSkill.name,
+          root_skill_source: rootSkill && rootSkill.source,
+          root_skill_desc: rootSkill && rootSkill.desc,
+          unmatched_names: unmatched.map(item => item.name)
+        };
+        """
+    )
+
+    assert result["ranked_names"] == [
+        "research",
+        "research-tools",
+        "browser-web-research",
+    ]
+    assert result["ranked_sources"] == ["skill", "skill", "skill"]
+    assert result["ranked_descs"] == [
+        "Exact skill match",
+        "Prefix skill match",
+        "Substring skill match",
+    ]
+    assert result["web_research_names"] == ["browser-web-research"]
+    assert result["cdp_names"] == ["browser-cdp-launcher"]
+    assert result["root_has_builtin"] is True
+    assert result["root_skill_name"] == "browser-web-research"
+    assert result["root_skill_source"] == "skill"
+    assert result["root_skill_desc"] == "Substring skill match"
+    assert result["unmatched_names"] == []
+
+
+def test_skill_autocomplete_handles_empty_and_failed_skill_responses():
+    for skills_response, skills_error in (({"skills": []}, False), (None, True)):
+        result = _run_commands_js(
+            """
+            await loadAgentCommandMetadata(true);
+            await loadBundleCommands(true);
+            await loadSkillCommands(true);
+            const root = await getSlashAutocompleteMatches('/');
+            const fragment = await getSlashAutocompleteMatches('/research');
+            return {
+              root_has_builtin: root.some(item => item.name === 'help' && item.source === 'builtin'),
+              root_skill_names: root.filter(item => item.source === 'skill').map(item => item.name),
+              fragment_names: fragment.map(item => item.name)
+            };
+            """,
+            skills_response=skills_response,
+            skills_error=skills_error,
+        )
+
+        assert result["root_has_builtin"] is True
+        assert result["root_skill_names"] == []
+        assert result["fragment_names"] == []
 
 
 def test_agent_command_metadata_helper_resolves_name_and_alias():
@@ -309,7 +402,7 @@ def test_cli_only_slugs_reserve_skill_autocomplete_namespace():
         await loadBundleCommands(true);
         await loadSkillCommands(true);
         const pet = await getSlashAutocompleteMatches('/pet');
-        const browser = await getSlashAutocompleteMatches('/bro');
+        const browser = await getSlashAutocompleteMatches('/browser');
         const handoff = await getSlashAutocompleteMatches('/handoff');
         const delegate = await getSlashAutocompleteMatches('/delegate');
         const incident = await getSlashAutocompleteMatches('/incident');
@@ -339,7 +432,8 @@ def test_cli_only_slugs_reserve_skill_autocomplete_namespace():
     assert result["pet_names"] == ["pet"]
     assert result["pet_sources"] == ["agent"]
     assert result["pet_descs"] == ["Desktop Companion command"]
-    assert result["browser_names"] == []
+    assert result["browser_names"] == ["browser-cdp-launcher", "browser-web-research"]
+    assert "browser" not in result["browser_names"]
     assert result["handoff_names"] == []
     assert result["delegate_names"] == []
     assert result["incident_names"] == ["incident-review"]
