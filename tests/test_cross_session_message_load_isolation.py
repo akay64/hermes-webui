@@ -786,11 +786,12 @@ console.log(JSON.stringify({ sameSessionQueued, crossSessionSuppressed, alreadyC
 
 
 @pytest.mark.skipif(NODE is None, reason="node not on PATH")
-def test_session_updated_helper_routes_same_session_events_safely():
+def test_session_updated_helper_routes_same_session_events_safely(tmp_path):
     body = _run_node(
         _SESSION_UPDATED_HELPER_NODE_TEMPLATE.replace(
             "__SESSION_UPDATED_HELPER_SRC__", SESSION_UPDATED_HELPER_SRC
-        )
+        ),
+        tmp_path,
     )
     assert body["sameSessionQueued"] is True
     assert body["crossSessionSuppressed"] is False
