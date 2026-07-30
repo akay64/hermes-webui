@@ -1288,6 +1288,7 @@ const USER_DISCLOSURE_IMAGE_ROW_CAPACITY=2;
 const USER_DISCLOSURE_ATTACHMENT_ROW_GAP=6;
 const USER_DISCLOSURE_ATTACHMENT_BOTTOM_MARGIN=10;
 const USER_DISCLOSURE_IMAGE_ROW_HEIGHT=96;
+const USER_DISCLOSURE_SECOND_CONTROL_HEIGHT=44;
 let _userDisclosureStateSid=null;
 const _userDisclosureState=new Map();
 const _userDisclosureHeights=new Map();
@@ -1381,7 +1382,7 @@ function _estimateUserDisclosureCollapsedHeight(rawText, attachmentHeight){
   return textHeight+Math.max(0,Number(attachmentHeight)||0);
 }
 function _estimateUserDisclosureExpandedHeight(rawText, attachmentHeight){
-  return _estimateUserRowIntrinsicHeight(rawText)+Math.max(0,Number(attachmentHeight)||0);
+  return _estimateUserRowIntrinsicHeight(rawText)+Math.max(0,Number(attachmentHeight)||0)+USER_DISCLOSURE_SECOND_CONTROL_HEIGHT;
 }
 function _userDisclosureIsOpen(row){
   const details=row&&row.querySelector?row.querySelector('details.user-message-disclosure'):null;
@@ -1442,6 +1443,14 @@ function _syncUserDisclosureSummary(details){
     : (typeof t==='function'?t('user_message_expand'):'Expand full message');
   summary.setAttribute('aria-label',label);
   summary.setAttribute('title',label);
+  const action=summary.querySelector('.user-message-disclosure-action');
+  if(action) action.textContent=label;
+  const bottomAction=details.querySelector(':scope > .user-message-disclosure-collapse-bottom');
+  if(bottomAction){
+    bottomAction.textContent=label;
+    bottomAction.setAttribute('aria-label',label);
+    bottomAction.setAttribute('title',label);
+  }
 }
 function _refreshUserDisclosureHeight(details){
   const row=details&&details.closest?details.closest('.msg-row[data-role="user"]'):null;
@@ -1468,10 +1477,19 @@ function _handleUserDisclosureToggle(event){
   _syncUserDisclosureSummary(details);
   _refreshUserDisclosureHeight(details);
 }
+function _handleUserDisclosureCollapseClick(event){
+  const button=event&&event.target&&event.target.closest
+    ? event.target.closest('.user-message-disclosure-collapse-bottom')
+    : null;
+  if(!button) return;
+  const details=button.closest('details.user-message-disclosure');
+  if(details&&details.open) details.open=false;
+}
 function _rehydrateUserMessageDisclosures(root){
   if(!root||!root.querySelectorAll) return;
   if(_userDisclosureDelegationRoot!==root){
     root.addEventListener('toggle',_handleUserDisclosureToggle,true);
+    root.addEventListener('click',_handleUserDisclosureCollapseClick);
     _userDisclosureDelegationRoot=root;
   }
   for(const details of root.querySelectorAll('details.user-message-disclosure')) _syncUserDisclosureSummary(details);
@@ -16853,7 +16871,7 @@ function renderMessages(options){
       const disclosureExpandLabel=typeof t==='function'?t('user_message_expand'):'Expand full message';
       const disclosureCollapseLabel=typeof t==='function'?t('user_message_collapse'):'Collapse message';
       const disclosureHtml=isLongDisclosure
-        ? `<details class="user-message-disclosure"${disclosureOpen?' open':''}><summary class="user-message-disclosure-summary" aria-label="${esc(disclosureOpen?disclosureCollapseLabel:disclosureExpandLabel)}" title="${esc(disclosureOpen?disclosureCollapseLabel:disclosureExpandLabel)}"><span class="user-message-disclosure-preview">${esc(_userDisclosurePreview(newRawText))}</span><span class="sr-only">${esc(disclosureOpen?disclosureCollapseLabel:disclosureExpandLabel)}</span></summary><div class="msg-body user-message-disclosure-body">${bodyHtml}</div></details>`
+        ? `<details class="user-message-disclosure"${disclosureOpen?' open':''}><summary class="user-message-disclosure-summary" aria-label="${esc(disclosureOpen?disclosureCollapseLabel:disclosureExpandLabel)}" title="${esc(disclosureOpen?disclosureCollapseLabel:disclosureExpandLabel)}"><span class="user-message-disclosure-preview">${esc(_userDisclosurePreview(newRawText))}</span><span class="user-message-disclosure-action" aria-hidden="true">${esc(disclosureOpen?disclosureCollapseLabel:disclosureExpandLabel)}</span></summary><div class="msg-body user-message-disclosure-body">${bodyHtml}</div><button type="button" class="user-message-disclosure-collapse-bottom" aria-label="${esc(disclosureCollapseLabel)}" title="${esc(disclosureCollapseLabel)}">${esc(disclosureCollapseLabel)}</button></details>`
         : `<div class="msg-body">${bodyHtml}</div>`;
       const nextRowHtml=`${filesHtml}${disclosureHtml}${footHtml}`;
       if(row){

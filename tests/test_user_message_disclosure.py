@@ -6,6 +6,7 @@ import pytest
 
 ROOT = Path(__file__).resolve().parents[1]
 UI_JS_PATH = ROOT / "static" / "ui.js"
+STYLE_CSS_PATH = ROOT / "static" / "style.css"
 
 
 @pytest.fixture
@@ -25,6 +26,7 @@ def browser_page():
             pytest.skip(f"Chromium is unavailable: {exc}")
         page = browser.new_page()
         page.set_content("<!doctype html><html><body></body></html>")
+        page.add_style_tag(path=str(STYLE_CSS_PATH))
         page.add_script_tag(path=str(UI_JS_PATH))
         yield page
         browser.close()
@@ -70,8 +72,9 @@ def test_disclosure_rehydration_updates_native_toggle_accessibility(browser_page
             <div class="msg-row" data-role="user" data-session-msg-idx="3"
                  data-raw-text="${'x'.repeat(700)}" data-user-disclosure-long="1">
               <details class="user-message-disclosure">
-                <summary><span class="user-message-disclosure-preview">preview</span></summary>
+                <summary><span class="user-message-disclosure-preview">preview</span><span class="user-message-disclosure-action" aria-hidden="true">Expand full message</span></summary>
                 <div class="msg-body">complete content</div>
+                <button type="button" class="user-message-disclosure-collapse-bottom">Collapse message</button>
               </details>
             </div>`;
           document.body.appendChild(root);
@@ -79,13 +82,31 @@ def test_disclosure_rehydration_updates_native_toggle_accessibility(browser_page
           _rehydrateUserMessageDisclosures(root);
           const details = root.querySelector('details');
           const summary = root.querySelector('summary');
-          const initiallyClosed = !details.open && summary.getAttribute('aria-label') === 'Expand full message';
+          const action = root.querySelector('.user-message-disclosure-action');
+          const initiallyClosed = !details.open &&
+            summary.getAttribute('aria-label') === 'Expand full message' &&
+            action.textContent === 'Expand full message' &&
+            getComputedStyle(summary).borderTopStyle !== 'none' &&
+            root.querySelector('.msg-body').getClientRects().length === 0;
           details.open = true;
           details.dispatchEvent(new Event('toggle', {bubbles: true}));
-          const expanded = summary.getAttribute('aria-label') === 'Collapse message';
+          const bodyRect = root.querySelector('.msg-body').getBoundingClientRect();
+          const summaryRect = summary.getBoundingClientRect();
+          const bottomButton = root.querySelector('.user-message-disclosure-collapse-bottom');
+          const bottomRect = bottomButton.getBoundingClientRect();
+          const expanded = summary.getAttribute('aria-label') === 'Collapse message' &&
+            action.textContent === 'Collapse message' &&
+            getComputedStyle(summary).backgroundColor === 'rgba(0, 0, 0, 0)' &&
+            getComputedStyle(root.querySelector('.user-message-disclosure-preview')).display === 'none' &&
+            summaryRect.bottom <= bodyRect.top &&
+            bottomRect.top >= bodyRect.bottom;
+          bottomButton.click();
+          const collapsedFromBottom = !details.open &&
+            summary.getAttribute('aria-label') === 'Expand full message' &&
+            getComputedStyle(bottomButton).display === 'none';
           const contentPreserved = root.querySelector('.msg-body').textContent === 'complete content';
           root.remove();
-          return {initiallyClosed, expanded, contentPreserved};
+          return {initiallyClosed, expanded, collapsedFromBottom, contentPreserved};
         }
         """
     )
@@ -93,6 +114,7 @@ def test_disclosure_rehydration_updates_native_toggle_accessibility(browser_page
     assert result == {
         "initiallyClosed": True,
         "expanded": True,
+        "collapsedFromBottom": True,
         "contentPreserved": True,
     }
 
