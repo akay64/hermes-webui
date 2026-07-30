@@ -58,6 +58,7 @@ from api.turn_journal import append_turn_journal_event_for_stream
 from api.usage import prompt_cache_hit_percent
 from api.models import (
     _is_empty_partial_activity_message,
+    _append_recovered_turn_to_context,
     _evict_sessions_over_cap,
     clear_process_wakeup_pause,
     get_state_db_session_messages,
@@ -73,6 +74,8 @@ from api.process_event_utils import (
     release_async_delegation_delivery,
     requeue_async_delegation_event,
     schedule_async_delegation_claim_retry,
+    find_active_turn_checkpoint,
+    message_matches_active_turn_token,
     stamp_message_source,
 )
 
@@ -1503,13 +1506,7 @@ def _active_turn_boundary_is_valid(identity):
 
 def _active_turn_token_matches(message, identity):
     token = identity.get('token') if isinstance(identity, dict) else None
-    if not token:
-        return False
-    return (
-        isinstance(message, dict)
-        and message.get('role') == 'user'
-        and message.get('_active_turn_token') == token
-    )
+    return message_matches_active_turn_token(message, token)
 
 
 def _active_turn_has_checkpoint(messages, identity):
@@ -7094,6 +7091,14 @@ def _materialize_pending_user_turn_before_error(session) -> bool:
         recovered_ts = int(pending_started_at)
     pending_source = getattr(session, 'pending_user_source', None) or 'webui'
     pending_attachments = list(getattr(session, 'pending_attachments', None) or [])
+    active_turn_token = build_active_turn_token(
+        getattr(session, 'active_stream_id', None),
+        pending_started_at,
+    )
+    active_turn_checkpoint = find_active_turn_checkpoint(
+        getattr(session, 'messages', None),
+        active_turn_token,
+    )
 
     def is_exact_checkpoint(messages):
         if not isinstance(messages, list) or not messages:
@@ -7113,6 +7118,10 @@ def _materialize_pending_user_turn_before_error(session) -> bool:
             and list(existing.get('attachments') or []) == pending_attachments
         )
 
+    if active_turn_checkpoint is not None:
+        if isinstance(getattr(session, 'context_messages', None), list):
+            _append_recovered_turn_to_context(session, active_turn_checkpoint)
+        return False
     if is_exact_checkpoint(getattr(session, 'messages', None)):
         return False
     recovered = {
@@ -7121,7 +7130,11 @@ def _materialize_pending_user_turn_before_error(session) -> bool:
         'timestamp': recovered_ts,
         '_recovered': True,
     }
-    stamp_message_source(recovered, pending_source)
+    stamp_message_source(
+        recovered,
+        pending_source,
+        active_turn_token=active_turn_token,
+    )
     if pending_attachments:
         recovered['attachments'] = pending_attachments
     session.messages.append(recovered)
@@ -7134,8 +7147,9 @@ def _materialize_pending_user_turn_before_error(session) -> bool:
     # Placing the mirror here (rather than in _persist_cancelled_turn) covers
     # all three callers: cancel, provider-error, and exception paths.
     ctx = getattr(session, 'context_messages', None)
-    if isinstance(ctx, list) and ctx and not is_exact_checkpoint(ctx):
-        ctx.append(dict(recovered))
+    if isinstance(ctx, list) and not is_exact_checkpoint(ctx):
+        if not active_turn_token or find_active_turn_checkpoint(ctx, active_turn_token) is None:
+            ctx.append(dict(recovered))
     # The new user turn is now committed to messages (#3831): advance a positive
     # truncation watermark left over from a prior retry/undo/edit so that
     # merge_session_messages_append_only() still filters out replaced pre-edit
@@ -12064,12 +12078,20 @@ def cancel_stream(stream_id: str) -> bool:
                     _pending_started = getattr(_cs, 'pending_started_at', None) or 0
                     _msgs_for_recovery = _cs.messages if isinstance(_cs.messages, list) else None
                     if _pending_user and _msgs_for_recovery is not None:
+                        _active_turn_token = build_active_turn_token(
+                            stream_id,
+                            _pending_started,
+                        )
+                        _active_turn_checkpoint = find_active_turn_checkpoint(
+                            _msgs_for_recovery,
+                            _active_turn_token,
+                        )
                         _last_user = None
                         for _m in reversed(_msgs_for_recovery):
                             if isinstance(_m, dict) and _m.get('role') == 'user':
                                 _last_user = _m
                                 break
-                        _already_persisted = False
+                        _already_persisted = _active_turn_checkpoint is not None
                         if _last_user is not None:
                             _last_content = _last_user.get('content')
                             _last_ts = _last_user.get('timestamp') or 0
@@ -12092,10 +12114,20 @@ def cancel_stream(stream_id: str) -> bool:
                                 'content': _pending_user,
                                 'timestamp': _recovered_ts,
                             }
-                            stamp_message_source(_user_turn, _pending_source)
+                            stamp_message_source(
+                                _user_turn,
+                                _pending_source,
+                                active_turn_token=_active_turn_token,
+                            )
                             if _pending_atts:
                                 _user_turn['attachments'] = _pending_atts
                             _msgs_for_recovery.append(_user_turn)
+                            if isinstance(getattr(_cs, 'context_messages', None), list):
+                                _append_recovered_turn_to_context(_cs, _user_turn)
+                        elif _active_turn_checkpoint is not None and isinstance(
+                            getattr(_cs, 'context_messages', None), list
+                        ):
+                            _append_recovered_turn_to_context(_cs, _active_turn_checkpoint)
                 except Exception:
                     logger.debug(
                         "Failed to recover pending user message on cancel for %s",

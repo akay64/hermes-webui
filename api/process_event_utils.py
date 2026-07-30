@@ -183,6 +183,31 @@ def build_active_turn_token(stream_id: Any, started_at: Any) -> str | None:
     return f"{str(stream_id).strip()}:{started:.17g}"
 
 
+def message_matches_active_turn_token(message: Any, token: Any) -> bool:
+    """Return whether ``message`` is the user checkpoint for ``token``.
+
+    Active-turn tokens are exact execution identities, not prompt-content
+    fingerprints.  Keep this predicate role-aware so metadata on assistant or
+    tool rows can never make a pending user turn appear checkpointed.
+    """
+    return (
+        bool(token)
+        and isinstance(message, dict)
+        and message.get("role") == "user"
+        and message.get("_active_turn_token") == token
+    )
+
+
+def find_active_turn_checkpoint(messages: Any, token: Any) -> dict | None:
+    """Find the display user checkpoint carrying an exact active-turn token."""
+    if not token or not isinstance(messages, list):
+        return None
+    for message in messages:
+        if message_matches_active_turn_token(message, token):
+            return message
+    return None
+
+
 def stamp_message_source(
     msg: Any,
     source: Any,

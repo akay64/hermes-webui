@@ -42,7 +42,11 @@ from api.agent_sessions import (
     read_importable_agent_session_rows,
     read_session_lineage_metadata,
 )
-from api.process_event_utils import stamp_message_source
+from api.process_event_utils import (
+    build_active_turn_token,
+    find_active_turn_checkpoint,
+    stamp_message_source,
+)
 
 logger = logging.getLogger(__name__)
 CLI_VISIBLE_SESSION_LIMIT = 20
@@ -865,6 +869,9 @@ def _append_recovered_context_projection(
     context_messages: list,
     recovered: dict,
 ) -> None:
+    active_turn_token = recovered.get('_active_turn_token')
+    if active_turn_token and find_active_turn_checkpoint(context_messages, active_turn_token):
+        return
     recovered_text = _normalize_journal_recovery_text(recovered.get('content'))
     if recovered_text:
         if recovered.get('role') == 'user':
@@ -906,13 +913,22 @@ def _append_recovered_turn_to_context(session, recovered: dict) -> None:
     _append_recovered_context_projection(session, context_messages, projected)
 
 
-def _append_recovered_pending_turn(session, *, timestamp: int | None = None) -> dict | None:
+def _append_recovered_pending_turn(
+    session,
+    *,
+    timestamp: int | None = None,
+    stream_id=None,
+) -> dict | None:
     pending_text = str(session.pending_user_message or '')
     if not pending_text:
         return None
     recovered_ts = int(time.time())
     if isinstance(timestamp, (int, float)) and timestamp > 0:
         recovered_ts = int(timestamp)
+    active_turn_token = build_active_turn_token(
+        stream_id if stream_id is not None else getattr(session, 'active_stream_id', None),
+        getattr(session, 'pending_started_at', None),
+    )
     recovered: dict = {
         'role': 'user',
         'content': session.pending_user_message,
@@ -920,7 +936,11 @@ def _append_recovered_pending_turn(session, *, timestamp: int | None = None) -> 
         '_recovered': True,
     }
     pending_source = getattr(session, 'pending_user_source', None)
-    stamp_message_source(recovered, pending_source)
+    stamp_message_source(
+        recovered,
+        pending_source,
+        active_turn_token=active_turn_token,
+    )
     if session.pending_attachments:
         recovered['attachments'] = list(session.pending_attachments)
     session.messages.append(recovered)
@@ -3390,12 +3410,24 @@ def _apply_core_sync_or_error_marker(
         _recovered_ts = int(time.time())
         if isinstance(session.pending_started_at, (int, float)) and session.pending_started_at > 0:
             _recovered_ts = int(session.pending_started_at)
-        _already_checkpointed = _message_matches_pending_checkpoint(
-            session.messages[-1],
-            session.pending_user_message,
-            _recovered_ts,
-            session.pending_user_source,
-            session.pending_attachments,
+        _stream_id = stream_id_for_recheck or session.active_stream_id
+        _active_turn_token = build_active_turn_token(
+            _stream_id,
+            session.pending_started_at,
+        )
+        _active_turn_checkpoint = find_active_turn_checkpoint(
+            session.messages,
+            _active_turn_token,
+        )
+        _already_checkpointed = (
+            _active_turn_checkpoint is not None
+            or _message_matches_pending_checkpoint(
+                session.messages[-1],
+                session.pending_user_message,
+                _recovered_ts,
+                session.pending_user_source,
+                session.pending_attachments,
+            )
         )
         _tail_user_already_checkpointed = _already_checkpointed or _message_matches_pending_text(
             session.messages[-1],
@@ -3404,7 +3436,11 @@ def _apply_core_sync_or_error_marker(
         _pending_started_at = session.pending_started_at
         if _run_journal_terminal_state(session, _stream_id) == 'completed':
             if not (_already_checkpointed or _latest_user_matches_pending_text(session.messages, session.pending_user_message)):
-                _append_recovered_pending_turn(session, timestamp=_recovered_ts)
+                _append_recovered_pending_turn(
+                    session,
+                    timestamp=_recovered_ts,
+                    stream_id=_stream_id,
+                )
             _append_journaled_partial_output(
                 session,
                 _stream_id,
@@ -3423,7 +3459,13 @@ def _apply_core_sync_or_error_marker(
             )
             return True
         if not _tail_user_already_checkpointed:
-            _append_recovered_pending_turn(session, timestamp=_recovered_ts)
+            _append_recovered_pending_turn(
+                session,
+                timestamp=_recovered_ts,
+                stream_id=_stream_id,
+            )
+        elif _active_turn_checkpoint is not None:
+            _append_recovered_turn_to_context(session, _active_turn_checkpoint)
         else:
             recovered = {
                 'role': 'user',
@@ -3432,8 +3474,11 @@ def _apply_core_sync_or_error_marker(
                 '_recovered': True,
             }
             pending_source = getattr(session, 'pending_user_source', None)
-            if pending_source and pending_source != 'webui':
-                recovered['_source'] = pending_source
+            stamp_message_source(
+                recovered,
+                pending_source,
+                active_turn_token=_active_turn_token,
+            )
             if session.pending_attachments:
                 recovered['attachments'] = list(session.pending_attachments)
             _append_recovered_turn_to_context(session, recovered)
@@ -3491,15 +3536,31 @@ def _apply_core_sync_or_error_marker(
                 session.messages[-1] if session.messages else None,
                 session.pending_user_message,
             )
+            _active_turn_token = build_active_turn_token(
+                _stream_id,
+                session.pending_started_at,
+            )
+            _active_turn_checkpoint = find_active_turn_checkpoint(
+                session.messages,
+                _active_turn_token,
+            )
+            _already_checkpointed = _already_checkpointed or _active_turn_checkpoint is not None
             if (
                 _pending_text
                 and not _tail_user_already_checkpointed
+                and _active_turn_checkpoint is None
                 and (
                     _run_journal_has_visible_output(session, _stream_id)
                     or _terminal_recovery is not None
                 )
             ):
-                _append_recovered_pending_turn(session, timestamp=_recovered_ts)
+                _append_recovered_pending_turn(
+                    session,
+                    timestamp=_recovered_ts,
+                    stream_id=_stream_id,
+                )
+            elif _active_turn_checkpoint is not None:
+                _append_recovered_turn_to_context(session, _active_turn_checkpoint)
             recovered_output, terminal_error_recovered = (
                 _recover_journaled_output_and_terminal_error(
                     session,
@@ -3550,7 +3611,11 @@ def _apply_core_sync_or_error_marker(
         _recovered_ts = int(time.time())
         if isinstance(session.pending_started_at, (int, float)) and session.pending_started_at > 0:
             _recovered_ts = int(session.pending_started_at)
-        _append_recovered_pending_turn(session, timestamp=_recovered_ts)
+        _append_recovered_pending_turn(
+            session,
+            timestamp=_recovered_ts,
+            stream_id=_stream_id,
+        )
     recovered_output, terminal_error_recovered = (
         _recover_journaled_output_and_terminal_error(
             session,
