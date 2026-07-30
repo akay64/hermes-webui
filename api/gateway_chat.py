@@ -1255,9 +1255,10 @@ def _run_gateway_chat_streaming(
             if saved_reasoning:
                 assistant_msg["reasoning"] = saved_reasoning
             previous_messages = list(getattr(s, "messages", None) or [])
-            previous_context = _build_gateway_success_context(
+            previous_context = list(getattr(s, "context_messages", None) or [])
+            settled_context = _build_gateway_success_context(
                 previous_messages,
-                getattr(s, "context_messages", None),
+                previous_context,
                 user_msg,
                 assistant_msg,
                 active_turn_token,
@@ -1271,23 +1272,23 @@ def _run_gateway_chat_streaming(
 
                 _assign_stable_message_ids(
                     [user_msg, assistant_msg],
-                    previous_context,
+                    settled_context,
                     list(getattr(s, "messages", None) or []),
                 )
             except Exception:
                 logger.debug("Failed to stamp stable ids on gateway turn rows", exc_info=True)
-            s.context_messages = previous_context
+            s.context_messages = settled_context
             try:
                 from api.streaming import _is_context_compression_marker
 
                 display_context = [
                     msg
-                    for msg in previous_context
+                    for msg in settled_context
                     if not _is_context_compression_marker(msg)
                 ]
             except Exception:
                 logger.debug("Failed to filter gateway display context markers", exc_info=True)
-                display_context = previous_context
+                display_context = settled_context
             display = merge_session_messages_append_only(
                 previous_messages,
                 display_context,
@@ -1297,7 +1298,7 @@ def _run_gateway_chat_streaming(
 
                 s.messages = _merge_display_messages_after_agent_result(
                     display,
-                    previous_context,
+                    settled_context,
                     s.context_messages,
                     str(msg_text or ""),
                     source=pending_source,
