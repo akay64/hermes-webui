@@ -1281,9 +1281,9 @@ function _messageViewportIntersectsRenderedRow(){
 // either. Refreshed every measure pass, so edits self-heal. Desktop rests at
 // content-visibility:visible (intrinsic-size ignored) → inert there, zero behavior change.
 const _userRowIntrinsicHeightBySessionIdx=Object.create(null);
-const USER_MESSAGE_COLLAPSE_CHAR_THRESHOLD=600;
-const USER_MESSAGE_COLLAPSE_LINE_THRESHOLD=8;
-const USER_MESSAGE_COLLAPSE_PREVIEW_MAX=180;
+const USER_MESSAGE_COLLAPSE_CHAR_THRESHOLD=1200;
+const USER_MESSAGE_COLLAPSE_LINE_THRESHOLD=16;
+const USER_MESSAGE_COLLAPSE_PREVIEW_MAX=250;
 const USER_DISCLOSURE_IMAGE_ROW_CAPACITY=2;
 const USER_DISCLOSURE_ATTACHMENT_ROW_GAP=6;
 const USER_DISCLOSURE_ATTACHMENT_BOTTOM_MARGIN=10;

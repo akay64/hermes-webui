@@ -36,14 +36,14 @@ def test_long_user_message_boundaries_and_unicode_preview(browser_page):
     result = browser_page.evaluate(
         """
         () => ({
-          shortChars: _isLongUserMessage('x'.repeat(599)),
-          thresholdChars: _isLongUserMessage('x'.repeat(600)),
-          shortLines: _isLongUserMessage(Array(7).fill('line').join('\\n')),
-          thresholdLines: _isLongUserMessage(Array(8).fill('line').join('\\n')),
-          longPastedLine: _isLongUserMessage('pasted '.repeat(100)),
-          previewLength: Array.from(_userDisclosurePreview('😀'.repeat(200))).length,
-          previewEndsWithEllipsis: _userDisclosurePreview('😀'.repeat(200)).endsWith('…'),
-          previewHasReplacementCharacter: _userDisclosurePreview('😀'.repeat(200)).includes('�'),
+          shortChars: _isLongUserMessage('x'.repeat(1199)),
+          thresholdChars: _isLongUserMessage('x'.repeat(1200)),
+          shortLines: _isLongUserMessage(Array(15).fill('line').join('\\n')),
+          thresholdLines: _isLongUserMessage(Array(16).fill('line').join('\\n')),
+          longPastedLine: _isLongUserMessage('pasted '.repeat(200)),
+          previewLength: Array.from(_userDisclosurePreview('😀'.repeat(300))).length,
+          previewEndsWithEllipsis: _userDisclosurePreview('😀'.repeat(300)).endsWith('…'),
+          previewHasReplacementCharacter: _userDisclosurePreview('😀'.repeat(300)).includes('�'),
           shortUnicodePreserved: _userDisclosurePreview('😀'.repeat(100)) === '😀'.repeat(100),
         })
         """
@@ -55,7 +55,7 @@ def test_long_user_message_boundaries_and_unicode_preview(browser_page):
         "shortLines": False,
         "thresholdLines": True,
         "longPastedLine": True,
-        "previewLength": 180,
+        "previewLength": 250,
         "previewEndsWithEllipsis": True,
         "previewHasReplacementCharacter": False,
         "shortUnicodePreserved": True,
@@ -70,7 +70,7 @@ def test_disclosure_rehydration_updates_native_toggle_accessibility(browser_page
           root.id = 'msgInner';
           root.innerHTML = `
             <div class="msg-row" data-role="user" data-session-msg-idx="3"
-                 data-raw-text="${'x'.repeat(700)}" data-user-disclosure-long="1">
+                 data-raw-text="${'x'.repeat(1400)}" data-user-disclosure-long="1">
               <details class="user-message-disclosure">
                 <summary><span class="user-message-disclosure-preview">preview</span><span class="user-message-disclosure-action" aria-hidden="true">Expand full message</span></summary>
                 <div class="msg-body">complete content</div>
@@ -166,7 +166,7 @@ def test_editing_closed_long_message_opens_editor_and_cancel_restores_state(brow
           const root = document.createElement('div');
           root.innerHTML = `
             <div class="msg-row" data-role="user" data-msg-idx="7"
-                 data-session-msg-idx="7" data-raw-text="${'x'.repeat(700)}"
+                 data-session-msg-idx="7" data-raw-text="${'x'.repeat(1400)}"
                  data-user-disclosure-long="1">
               <details class="user-message-disclosure">
                 <summary>preview</summary>
@@ -224,7 +224,7 @@ def test_narrow_attachment_layout_is_reserved_for_collapsed_and_expanded_rows(br
           root.className = 'message-column';
           root.innerHTML = `
             <div class="msg-row" data-role="user" data-session-msg-idx="8"
-                 data-raw-text="${'x'.repeat(700)}" data-user-disclosure-long="1">
+                 data-raw-text="${'x'.repeat(1400)}" data-user-disclosure-long="1">
               <div class="msg-files">
                 <img class="msg-media-img" alt="one">
                 <img class="msg-media-img" alt="two">
