@@ -171,6 +171,66 @@ def test_find_marker_falls_back_to_display_messages(tmp_path):
     assert marker["content"].startswith("[PRIOR CONTEXT")
 
 
+# ── Two-phase load: metadata-only sessions (review finding) ──────────────────
+
+
+def _write_sidecar(session_dir, sid, *, anchor_summary, context_messages=None):
+    """Write a modern-layout sidecar: metadata fields (incl. the anchor
+    summary) BEFORE the message arrays, so load_metadata_only() reads them
+    via the cheap prefix."""
+    import json
+
+    payload = {
+        "session_id": sid,
+        "title": "meta test",
+        "created_at": 100.0,
+        "updated_at": 200.0,
+        "workspace": str(session_dir),
+        "compression_anchor_summary": anchor_summary,
+        "message_count": 1,
+        "messages": [{"role": "user", "content": "hi"}],
+    }
+    if context_messages is not None:
+        payload["context_messages"] = context_messages
+    (session_dir / f"{sid}.json").write_text(json.dumps(payload), encoding="utf-8")
+
+
+def test_metadata_only_compact_reports_compressed_from_anchor_summary(_isolate_sessions):
+    """Regression: GET /api/session?messages=0 loads metadata-only, where the
+    message arrays are empty and the marker scan cannot run. The persisted
+    compression_anchor_summary (metadata prefix) is the authoritative signal."""
+    _write_sidecar(
+        _isolate_sessions,
+        "meta_compressed",
+        anchor_summary="[CONTEXT COMPACTION — REFERENCE ONLY]\nsome summary",
+    )
+    s = Session.load_metadata_only("meta_compressed")
+    assert s is not None
+    assert s.messages == []  # cheap prefix load — arrays are skipped
+    assert s.compact()["has_compressed_context"] is True
+
+
+def test_metadata_only_compact_reports_false_without_anchor_summary(_isolate_sessions):
+    _write_sidecar(_isolate_sessions, "meta_plain", anchor_summary=None)
+    s = Session.load_metadata_only("meta_plain")
+    assert s is not None
+    assert s.compact()["has_compressed_context"] is False
+
+
+def test_metadata_only_heuristic_does_not_leak_into_full_loads(tmp_path):
+    """A full-loaded session whose anchor summary is absent but whose context
+    messages DO contain a marker must still report true (scan path wins)."""
+    s = Session(
+        session_id="ctx_full_scan",
+        workspace=str(tmp_path),
+        context_messages=[
+            {"role": "assistant", "content": COMPACTION_MARKER}
+        ],
+        compression_anchor_summary=None,
+    )
+    assert s.compact()["has_compressed_context"] is True
+
+
 # ── Route boundary ───────────────────────────────────────────────────────────
 
 

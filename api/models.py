@@ -1764,10 +1764,20 @@ class Session:
         last_message_at = _last_message_timestamp(self.messages) or self.updated_at
         if has_pending_user_message and self.pending_started_at:
             last_message_at = self.pending_started_at
-        has_compressed_context = (
-            Session._messages_contain_compression_marker(self.context_messages)
-            or Session._messages_contain_compression_marker(self.messages)
-        )
+        if getattr(self, '_loaded_metadata_only', False):
+            # Metadata-only loads (GET /api/session?messages=0) skip the
+            # message arrays (cheap sidecar-prefix read), so the marker scan
+            # below cannot run and would always report false. The persisted
+            # compression_anchor_summary lives in the metadata prefix and is
+            # set exactly when compression occurred — use it as the
+            # authoritative cold-load signal. The full-load path (phase 2)
+            # scans markers directly, so the two paths agree on real data.
+            has_compressed_context = bool(self.compression_anchor_summary)
+        else:
+            has_compressed_context = (
+                Session._messages_contain_compression_marker(self.context_messages)
+                or Session._messages_contain_compression_marker(self.messages)
+            )
         return {
             'session_id': self.session_id,
             'title': self.title,

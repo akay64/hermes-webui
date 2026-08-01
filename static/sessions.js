@@ -3304,6 +3304,22 @@ function _syncToolCallsForLoadedMessages(messages, sessionToolCalls){
   }
 }
 
+// Phase-2 session hydration helper (pure, extracted for node-harness tests
+// in tests/test_context_summary_js.py). The messages=1 payload carries the
+// canonical has_compressed_context derived from the FULL message lists,
+// while the earlier messages=0 fetch derived it from empty arrays
+// (metadata-only sidecar-prefix load) and therefore always reported false.
+// Copy-when-present only: never delete, so a value established by an SSE
+// terminal payload (which replaces S.session wholesale) is not clobbered
+// by an older server response that lacks the field.
+function _copyPhase2HasCompressedContext(target, fullSession) {
+  if (!target || !fullSession) return target;
+  if (fullSession.has_compressed_context !== undefined) {
+    target.has_compressed_context = fullSession.has_compressed_context;
+  }
+  return target;
+}
+
 async function _ensureMessagesLoaded(sid, opts) {
   // `opts` is an explicit named parameter (vs loadSession's arguments[1]
   // pattern) because _ensureMessagesLoaded is a module-private helper: it is
@@ -3384,6 +3400,11 @@ async function _ensureMessagesLoaded(sid, opts) {
   }
   if(S.session&&S.session.session_id===sid){
     S.session.message_count=Number(data.session.message_count || msgs.length);
+    // Phase 2 carries the canonical has_compressed_context (derived from
+    // the FULL message lists); the messages=0 phase-1 fetch derived it from
+    // empty arrays, so without this copy the viewer button stays hidden on
+    // first load of a compressed session.
+    _copyPhase2HasCompressedContext(S.session, data.session);
     S.lastUsage={...(data.session.last_usage||S.lastUsage||{})};
     // Phase 2: the messages=1 response carries the canonical cold-load
     // `todo_state` snapshot, derived server-side from the FULL untruncated
