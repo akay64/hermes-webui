@@ -46,7 +46,11 @@ from api.agent_sessions import (
     is_cli_session_row_visible,
     read_session_lineage_report,
 )
-from api.compression_anchor import visible_messages_for_anchor
+from api.compression_anchor import (
+    visible_messages_for_anchor,
+    is_context_compression_marker,
+    _content_text,
+)
 from api.compression_recovery import (
     COMPRESSION_RECOVERY_ACTION_START_FOCUSED,
     clear_compression_recovery,
@@ -12610,6 +12614,34 @@ def handle_get(handler, parsed) -> bool:
             logger.exception("failed to read worktree status for session %s", sid)
             return bad(handler, _sanitize_error(exc), status=500)
 
+    if parsed.path == "/api/session/context_summary":
+        query = parse_qs(parsed.query)
+        sid = query.get("session_id", [""])[0]
+        if not sid:
+            return bad(handler, "session_id is required", status=400)
+        try:
+            s = get_session(sid)
+        except KeyError:
+            return bad(handler, "Session not found", status=404)
+        marker = _find_last_compression_marker(s)
+        if marker is None:
+            return j(handler, {"found": False, "role": None, "content": None, "text": None})
+        # Redact the marker first, then derive both response fields from the
+        # redacted copy so `content` and `text` can never disagree (review
+        # finding: redact_session_data only redacts inside messages[]).
+        redacted = redact_session_data({"messages": [marker]})["messages"][0]
+        content = redacted.get("content")
+        text = _content_text(content, part_types={"text", "input_text", "output_text"})
+        return j(
+            handler,
+            {
+                "found": True,
+                "role": redacted.get("role"),
+                "content": content,
+                "text": text,
+            },
+        )
+
     if parsed.path == "/api/session/compress/status":
         query = parse_qs(parsed.query)
         _handle_session_compress_status(handler, query.get("session_id", [""])[0])
@@ -24981,6 +25013,27 @@ def _handle_session_compress_start(handler, body):
 
     with _MANUAL_COMPRESSION_JOBS_LOCK:
         return j(handler, _manual_compression_status_payload(_MANUAL_COMPRESSION_JOBS.get(sid, job)))
+
+
+def _find_last_compression_marker(session):
+    """Return the most recent context-compression marker message, or None.
+
+    Scans ``context_messages`` first (the model-facing projection), then the
+    display ``messages`` list: merge-into-tail summaries can survive only in
+    the display projection (header ``[PRIOR CONTEXT ...]`` + delimiter +
+    summary). ``reversed()`` + first hit mirrors the agent-side
+    ``_compression_summary_from_messages`` last-marker semantics.
+    """
+    for messages in (
+        getattr(session, "context_messages", None),
+        getattr(session, "messages", None),
+    ):
+        if not isinstance(messages, list):
+            continue
+        for m in reversed(messages):
+            if isinstance(m, dict) and is_context_compression_marker(m):
+                return m
+    return None
 
 
 def _handle_session_compress_status(handler, sid):

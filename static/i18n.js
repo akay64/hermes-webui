@@ -1805,6 +1805,13 @@ const LOCALES = {
     outline_title: 'Outline',
     outline_empty: 'No questions yet.',
     outline_loading: 'Loading…',
+    // ── Compressed Context Viewer ──
+    context_summary_title: 'Compressed context',
+    context_summary_toggle_label: 'View compressed context',
+    context_summary_loading: 'Loading…',
+    context_summary_empty: 'No compressed context found for this session.',
+    context_summary_load_error: 'Failed to load compressed context.',
+    context_summary_close: 'Close',
   },
 
   it: {

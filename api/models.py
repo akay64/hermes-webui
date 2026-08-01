@@ -1735,6 +1735,22 @@ class Session:
                     n += 1
         return n
 
+    @staticmethod
+    def _messages_contain_compression_marker(messages) -> bool:
+        """True if any message in ``messages`` is a compression/reference marker.
+
+        Short-circuits on the first hit; the caller decides which message
+        lists to scan (``context_messages`` first, then the display
+        ``messages`` fallback for merge-into-tail markers that only survive
+        in the display projection).
+        """
+        if not isinstance(messages, list):
+            return False
+        for m in messages:
+            if isinstance(m, dict) and is_context_compression_marker(m):
+                return True
+        return False
+
     def compact(self, include_runtime=False, active_stream_ids=None) -> dict:
         active_stream_ids = active_stream_ids if active_stream_ids is not None else set()
         has_pending_user_message = bool(self.pending_user_message)
@@ -1748,6 +1764,10 @@ class Session:
         last_message_at = _last_message_timestamp(self.messages) or self.updated_at
         if has_pending_user_message and self.pending_started_at:
             last_message_at = self.pending_started_at
+        has_compressed_context = (
+            Session._messages_contain_compression_marker(self.context_messages)
+            or Session._messages_contain_compression_marker(self.messages)
+        )
         return {
             'session_id': self.session_id,
             'title': self.title,
@@ -1756,6 +1776,7 @@ class Session:
             'model_provider': self.model_provider,
             'reasoning_effort': self.reasoning_effort,
             'message_count': message_count,
+            'has_compressed_context': has_compressed_context,
             'created_at': self.created_at,
             'updated_at': self.updated_at,
             'last_message_at': last_message_at,
