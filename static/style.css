@@ -1379,7 +1379,7 @@
   :root:not(.dark) .project-chip.active{background:var(--accent-bg);color:var(--accent-text);border-color:var(--accent-bg-strong);}
   :root:not(.dark) .chip{border-color:rgba(0,0,0,.1);background:rgba(0,0,0,.04);}
   :root:not(.dark) .chip.model{color:var(--accent-text);border-color:var(--accent-bg-strong);background:var(--accent-bg);}
-.composer-selection-chips{display:flex;flex-direction:column;align-items:stretch;gap:7px;max-width:clamp(780px,60vw,1100px);width:100%;box-sizing:border-box;margin:0 auto 8px;padding:8px 0 0;min-height:0;}
+.composer-selection-chips{display:flex;flex-direction:column;align-items:stretch;gap:7px;max-width:1600px;width:100%;box-sizing:border-box;margin:0 auto 8px;padding:8px 0 0;min-height:0;}
 .composer-selection-chips[hidden]{display:none;}
 .composer-selection-toolbar{display:flex;align-items:center;gap:6px;align-self:flex-start;}
 .composer-selection-toggle{display:inline-flex;align-items:center;align-self:flex-start;gap:6px;min-height:32px;padding:5px 10px;border:1px solid var(--border2);border-radius:999px;background:transparent;color:var(--muted);font-family:var(--font-ui);font-size:11px;font-weight:650;line-height:1.2;cursor:pointer;}
@@ -1414,7 +1414,6 @@
 .selection-context-card.pending-context-focus-flash{animation:pending-context-focus-flash .8s ease-out;}
 @keyframes pending-context-focus-flash{0%,100%{border-color:var(--border2);box-shadow:0 1px 0 rgba(255,255,255,.03) inset;}35%{border-color:var(--accent);box-shadow:0 0 0 3px var(--accent-bg-strong),0 1px 0 rgba(255,255,255,.03) inset;}}
 @media (prefers-reduced-motion:reduce){.selection-context-card.pending-context-focus-flash{animation:none;border-color:var(--accent);box-shadow:0 0 0 2px var(--accent-bg-strong);}}
-@media (min-width:1600px){.composer-selection-chips{max-width:1600px;}}
 @media (hover:none) and (pointer:coarse){.composer-selection-list{max-height:min(28dvh,220px);}.composer-selection-toggle,.composer-selection-clear,.selection-context-name,.selection-context-remove,.pending-context-bubble{min-height:44px;}.selection-context-remove,.pending-context-bubble{min-width:44px;}}
 .sent-selection-context{margin:9px 0 0;padding:7px 10px;border:1px solid color-mix(in srgb,var(--user-bubble-border) 72%,var(--accent) 28%);border-left:3px solid var(--accent);border-radius:10px;background:color-mix(in srgb,var(--user-bubble-bg) 86%,var(--accent-bg) 14%);}
 .sent-selection-context-summary{display:grid;grid-template-columns:minmax(0,1fr) auto;column-gap:10px;align-items:center;cursor:pointer;list-style:none;}
@@ -2622,7 +2621,8 @@
   .suggestion:hover{background:var(--accent-bg);color:var(--text);border-color:var(--accent-bg);transform:translateX(2px);}
   /* ── Composer ── */
   .composer-wrap{padding:12px 20px 16px;background:var(--bg);flex-shrink:0;}
-  .composer-box{max-width:clamp(780px,60vw,1100px);margin:0 auto;background:linear-gradient(var(--input-bg),var(--input-bg)),var(--bg);border:1px solid var(--border2);border-radius:16px;display:flex;flex-direction:column;transition:border-color .2s,box-shadow .2s;position:relative;z-index:2;}
+  /* Cap composer width on very wide displays so the chip-cluster gap stays bounded */
+  .composer-box{max-width:1600px;margin:0 auto;background:linear-gradient(var(--input-bg),var(--input-bg)),var(--bg);border:1px solid var(--border2);border-radius:16px;display:flex;flex-direction:column;transition:border-color .2s,box-shadow .2s;position:relative;z-index:2;}
   .composer-box:focus-within{border-color:var(--accent);box-shadow:0 0 0 3px var(--accent-bg);}
   .composer-wrap.drag-over .composer-box{border-color:var(--accent);box-shadow:0 0 0 3px var(--accent-bg);}
   .drop-hint{display:none;position:absolute;inset:0;align-items:center;justify-content:center;gap:10px;background:linear-gradient(var(--input-bg),var(--input-bg)),var(--bg);border:2px dashed var(--accent);border-radius:16px;font-size:13.5px;font-weight:600;color:var(--accent-text);pointer-events:none;z-index:30;flex-direction:column;text-align:center;padding:8px;}
@@ -7249,11 +7249,6 @@ main.main.showing-logs > #mainLogs{display:flex;}
   direction:ltr;
   text-align:left;
   unicode-bidi:isolate;
-}
-
-/* Cap composer width on very wide displays so the chip-cluster gap stays bounded */
-@media (min-width:1600px) {
-  .composer-box{max-width:1600px;margin:0 auto;}
 }
 
 #composerMobileCtxBadge { display: none !important; }
