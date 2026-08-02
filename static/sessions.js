@@ -3204,6 +3204,32 @@ function _settledSessionMessageWindowUrl(sid, nextSession, options){
   return limit===null?base:`${base}&msg_limit=${encodeURIComponent(limit)}`;
 }
 
+function _settledWindowMessageMatchesExpectedTail(message, expected){
+  if(!message||!expected||message.role!==expected.role) return false;
+  try{
+    return JSON.stringify(message.content??null)===JSON.stringify(expected.content??null);
+  }catch(_){
+    return false;
+  }
+}
+
+function _validateSettledSessionMessageWindow(sid, session, nextSession){
+  if(!session||session.session_id!==sid) throw new Error('Settled session window identity mismatch');
+  if(!Array.isArray(session.messages)||!Array.isArray(session.tool_calls)){
+    throw new Error('Settled session window has invalid transcript shape');
+  }
+  const expectedMessages=Array.isArray(nextSession&&nextSession.messages)?nextSession.messages:[];
+  const expectedTail=[...expectedMessages].reverse().find(message=>
+    message&&message.role&&message.role!=='tool'
+  );
+  if(expectedTail&&!session.messages.some(message=>
+    _settledWindowMessageMatchesExpectedTail(message,expectedTail)
+  )){
+    throw new Error('Settled session window is missing the completed turn');
+  }
+  return session;
+}
+
 async function _fetchSettledSessionMessageWindow(sid, nextSession, options){
   const limit=_settledSessionMessageWindowLimit(nextSession,options);
   if(limit===null) return null;
@@ -3212,7 +3238,7 @@ async function _fetchSettledSessionMessageWindow(sid, nextSession, options){
     {timeoutMs:120000}
   );
   if(!data||!data.session) throw new Error('Settled session window unavailable');
-  return data.session;
+  return _validateSettledSessionMessageWindow(sid,data.session,nextSession);
 }
 
 function _captureSameSessionForceReloadHint(sid){

@@ -115,10 +115,12 @@ function _currentLoadedRenderableMessageCount() { return loadedRenderable; }
 const calls = [];
 async function api(url, options) {
   calls.push({url, options});
-  return {session: {_messages_truncated: true, _messages_offset: 70, messages: []}};
+  return {session: {session_id: 'sid-1', _messages_truncated: true, _messages_offset: 70, messages: [], tool_calls: []}};
 }
 eval(extractFunction('_settledSessionMessageWindowLimit'));
 eval(extractFunction('_settledSessionMessageWindowUrl'));
+eval(extractFunction('_settledWindowMessageMatchesExpectedTail'));
+eval(extractFunction('_validateSettledSessionMessageWindow'));
 eval(extractFunction('_fetchSettledSessionMessageWindow'));
 (async()=>{
 const bounded = await _fetchSettledSessionMessageWindow('sid-1', {message_count: 103}, {});
@@ -138,6 +140,93 @@ console.log(JSON.stringify({bounded, full, forced, calls}));
     assert "session_id=sid-1&messages=1&resolve_model=0&msg_limit=30" in outcome["calls"][1]["url"]
     assert outcome["calls"][0]["options"] == {"timeoutMs": 120000}
     assert outcome["calls"][1]["options"] == {"timeoutMs": 120000}
+
+
+@pytest.mark.parametrize(
+    ("session", "error"),
+    [
+        ({"session_id": "sid-1", "tool_calls": []}, "invalid transcript shape"),
+        (
+            {"session_id": "sid-2", "messages": [], "tool_calls": []},
+            "identity mismatch",
+        ),
+        (
+            {
+                "session_id": "sid-1",
+                "messages": [{"role": "assistant", "content": "stale answer"}],
+                "tool_calls": [],
+            },
+            "missing the completed turn",
+        ),
+    ],
+)
+def test_settled_window_fetch_rejects_malformed_or_stale_success(session, error):
+    outcome = _node_driver(
+        _EXTRACT
+        + rf"""
+const _INITIAL_MSG_LIMIT = 30;
+let _messagesTruncated = true;
+const S = {{messages: [], session: {{message_count: 1}}}};
+function _currentLoadedRenderableMessageCount() {{ return 0; }}
+async function api() {{ return {{session: {json.dumps(session)}}}; }}
+eval(extractFunction('_settledSessionMessageWindowLimit'));
+eval(extractFunction('_settledSessionMessageWindowUrl'));
+eval(extractFunction('_settledWindowMessageMatchesExpectedTail'));
+eval(extractFunction('_validateSettledSessionMessageWindow'));
+eval(extractFunction('_fetchSettledSessionMessageWindow'));
+(async()=>{{
+  try {{
+    await _fetchSettledSessionMessageWindow(
+      'sid-1',
+      {{session_id: 'sid-1', message_count: 1, messages: [{{role: 'assistant', content: 'final answer'}}]}},
+      {{}}
+    );
+    console.log(JSON.stringify({{error: null}}));
+  }} catch (err) {{
+    console.log(JSON.stringify({{error: String(err&&err.message||err)}}));
+  }}
+}})();
+"""
+    )
+
+    assert error in outcome["error"]
+
+
+def test_settled_window_fetch_accepts_exact_completed_tail():
+    outcome = _node_driver(
+        _EXTRACT
+        + r"""
+const _INITIAL_MSG_LIMIT = 30;
+let _messagesTruncated = true;
+const S = {messages: [], session: {message_count: 2}};
+function _currentLoadedRenderableMessageCount() { return 0; }
+async function api() {
+  return {session: {
+    session_id: 'sid-1',
+    messages: [
+      {role: 'user', content: 'question'},
+      {role: 'assistant', content: [{type: 'text', text: 'final answer'}]},
+    ],
+    tool_calls: [],
+  }};
+}
+eval(extractFunction('_settledSessionMessageWindowLimit'));
+eval(extractFunction('_settledSessionMessageWindowUrl'));
+eval(extractFunction('_settledWindowMessageMatchesExpectedTail'));
+eval(extractFunction('_validateSettledSessionMessageWindow'));
+eval(extractFunction('_fetchSettledSessionMessageWindow'));
+(async()=>{
+  const session = await _fetchSettledSessionMessageWindow(
+    'sid-1',
+    {session_id: 'sid-1', message_count: 2, messages: [{role: 'assistant', content: [{type: 'text', text: 'final answer'}]}]},
+    {}
+  );
+  console.log(JSON.stringify({sessionId: session.session_id, messageCount: session.messages.length}));
+})().catch(err=>{ console.error(err.stack || err); process.exit(1); });
+"""
+    )
+
+    assert outcome == {"sessionId": "sid-1", "messageCount": 2}
 
 
 def test_reload_limit_preserves_expanded_window_without_force_reload_hint():
