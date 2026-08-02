@@ -25015,24 +25015,78 @@ def _handle_session_compress_start(handler, body):
         return j(handler, _manual_compression_status_payload(_MANUAL_COMPRESSION_JOBS.get(sid, job)))
 
 
-def _find_last_compression_marker(session):
-    """Return the most recent context-compression marker message, or None.
+_COMPRESSION_TASK_LIST_MARKER = (
+    "[your active task list was preserved across context compression]"
+)
+_COMPRESSION_CONTEXT_MARKER = "[context compaction — reference only]"
+_MERGED_PRIOR_CONTEXT_HEADER = "[prior context — for reference only; not a new message]"
+_MERGED_SUMMARY_DELIMITER = "[end of prior context — compaction summary below]"
 
-    Scans ``context_messages`` first (the model-facing projection), then the
-    display ``messages`` list: merge-into-tail summaries can survive only in
-    the display projection (header ``[PRIOR CONTEXT ...]`` + delimiter +
-    summary). ``reversed()`` + first hit mirrors the agent-side
-    ``_compression_summary_from_messages`` last-marker semantics.
+
+def _compression_marker_text(message):
+    if not isinstance(message, dict):
+        return ""
+    return _content_text(
+        message.get("content", ""),
+        part_types={"text", "input_text", "output_text"},
+    ).lower().lstrip()
+
+
+def _is_preserved_task_list_marker(message):
+    return _compression_marker_text(message).startswith(_COMPRESSION_TASK_LIST_MARKER)
+
+
+def _is_merged_compression_envelope(message):
+    """Return true for an unflagged merge-into-tail compression envelope."""
+    text = _compression_marker_text(message)
+    if not text.startswith(_MERGED_PRIOR_CONTEXT_HEADER):
+        return False
+
+    delimiter_start = text.find(
+        _MERGED_SUMMARY_DELIMITER,
+        len(_MERGED_PRIOR_CONTEXT_HEADER),
+    )
+    if delimiter_start == -1:
+        return False
+
+    summary_start = delimiter_start + len(_MERGED_SUMMARY_DELIMITER)
+    return text.find(_COMPRESSION_CONTEXT_MARKER, summary_start) != -1
+
+
+def _is_substantive_compression_marker(message):
+    """Return true for viewer-worthy summaries, excluding task-list cards."""
+    if _is_preserved_task_list_marker(message):
+        return False
+    return is_context_compression_marker(message) or _is_merged_compression_envelope(message)
+
+
+def _find_last_compression_marker(session):
+    """Return the most recent substantive compression marker, or a fallback.
+
+    Search the model-facing ``context_messages`` projection before the display
+    ``messages`` projection. Within each projection, substantive summaries
+    outrank the task-list preservation card. If no substantive summary exists,
+    retain the old generic detector fallback so task-list-only sessions still
+    expose their preservation card.
     """
-    for messages in (
+    projections = (
         getattr(session, "context_messages", None),
         getattr(session, "messages", None),
-    ):
+    )
+
+    for messages in projections:
         if not isinstance(messages, list):
             continue
-        for m in reversed(messages):
-            if isinstance(m, dict) and is_context_compression_marker(m):
-                return m
+        for message in reversed(messages):
+            if _is_substantive_compression_marker(message):
+                return message
+
+    for messages in projections:
+        if not isinstance(messages, list):
+            continue
+        for message in reversed(messages):
+            if isinstance(message, dict) and is_context_compression_marker(message):
+                return message
     return None
 
 

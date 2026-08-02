@@ -29,6 +29,21 @@ PRIOR_CONTEXT_MARKER = (
     "[PRIOR CONTEXT — for reference only; not a new message]\n"
     "Basically the original tail message text.\n"
 )
+TASK_LIST_MARKER = (
+    "[Your active task list was preserved across context compression]\n"
+    "- [>] preserve the current task"
+)
+UNBRACKETED_COMPACTION_MARKER = (
+    "Context compaction — legacy flagged summary\n"
+    "Older compressed context."
+)
+SESSION_ARC_MARKER = "[SESSION ARC SUMMARY] earlier compressed context"
+MERGED_COMPRESSION_ENVELOPE = (
+    "[PRIOR CONTEXT — for reference only; not a new message]\n"
+    "Preserved tail text.\n\n"
+    "[END OF PRIOR CONTEXT — COMPACTION SUMMARY BELOW]\n\n"
+    + COMPACTION_MARKER
+)
 
 
 @pytest.fixture(autouse=True)
@@ -171,6 +186,96 @@ def test_find_marker_falls_back_to_display_messages(tmp_path):
     assert marker["content"].startswith("[PRIOR CONTEXT")
 
 
+def test_find_marker_prefers_substantive_markers_over_later_task_card(tmp_path):
+    from api.routes import _find_last_compression_marker
+
+    cases = [
+        (
+            {"role": "assistant", "content": UNBRACKETED_COMPACTION_MARKER, "_compressed_summary": True},
+            "flagged unbracketed compaction",
+        ),
+        (
+            {"role": "assistant", "content": COMPACTION_MARKER},
+            "canonical compaction",
+        ),
+        (
+            {"role": "assistant", "content": PRIOR_CONTEXT_MARKER, "_compressed_summary": True},
+            "flagged prior context",
+        ),
+        (
+            {"role": "assistant", "content": SESSION_ARC_MARKER},
+            "session arc summary",
+        ),
+        (
+            {
+                "role": "assistant",
+                "content": [
+                    {"type": "input_text", "text": MERGED_COMPRESSION_ENVELOPE},
+                ],
+            },
+            "unflagged merged envelope",
+        ),
+    ]
+
+    for substantive, label in cases:
+        task_card = {"role": "user", "content": TASK_LIST_MARKER}
+        session = Session(
+            session_id=f"ctx_rank_{label.replace(' ', '_')}",
+            workspace=str(tmp_path),
+            context_messages=[substantive, task_card],
+        )
+        marker = _find_last_compression_marker(session)
+        assert marker is substantive, label
+
+
+def test_find_marker_uses_display_substantive_before_context_task_fallback(tmp_path):
+    from api.routes import _find_last_compression_marker
+
+    substantive = {"role": "assistant", "content": MERGED_COMPRESSION_ENVELOPE}
+    session = Session(
+        session_id="ctx_display_substantive",
+        workspace=str(tmp_path),
+        context_messages=[{"role": "user", "content": TASK_LIST_MARKER}],
+        messages=[substantive],
+    )
+
+    assert _find_last_compression_marker(session) is substantive
+
+
+def test_unflagged_merged_envelope_requires_all_ordered_delimiters(tmp_path):
+    from api.routes import _find_last_compression_marker
+
+    incomplete_envelope = (
+        "[PRIOR CONTEXT — for reference only; not a new message]\n"
+        "[END OF PRIOR CONTEXT — COMPACTION SUMMARY BELOW]\n"
+        "ordinary preserved text without a compaction summary"
+    )
+    task_card = {"role": "user", "content": TASK_LIST_MARKER}
+    session = Session(
+        session_id="ctx_incomplete_envelope",
+        workspace=str(tmp_path),
+        context_messages=[
+            {"role": "assistant", "content": incomplete_envelope},
+            task_card,
+        ],
+    )
+
+    assert _find_last_compression_marker(session) is task_card
+
+
+def test_task_list_marker_is_generic_fallback_when_no_substantive_summary(tmp_path):
+    from api.routes import _find_last_compression_marker
+
+    task_card = {"role": "user", "content": TASK_LIST_MARKER}
+    session = Session(
+        session_id="ctx_task_only",
+        workspace=str(tmp_path),
+        context_messages=[task_card],
+    )
+
+    assert _find_last_compression_marker(session) is task_card
+
+
 # ── Two-phase load: metadata-only sessions (review finding) ──────────────────
 
 
@@ -276,6 +381,35 @@ def test_route_returns_compressed_marker(marker_session, monkeypatch):
     assert payload["role"] == "assistant"
     assert payload["content"].startswith("[CONTEXT COMPACTION")
     assert payload["text"].startswith("[CONTEXT COMPACTION")
+
+
+def test_route_returns_merged_envelope_before_task_card(tmp_path, monkeypatch):
+    import api.routes as routes
+
+    Session(
+        session_id="ctx_route_merged",
+        workspace=str(tmp_path),
+        messages=[{"role": "user", "content": TASK_LIST_MARKER}],
+        context_messages=[
+            {"role": "assistant", "content": MERGED_COMPRESSION_ENVELOPE},
+            {"role": "user", "content": TASK_LIST_MARKER},
+        ],
+    ).save()
+    captured = _capture_j(monkeypatch)
+
+    handled = routes.handle_get(
+        object(),
+        urlparse("/api/session/context_summary?session_id=ctx_route_merged"),
+    )
+
+    assert handled is True
+    assert captured["status"] == 200
+    payload = captured["payload"]
+    assert payload["found"] is True
+    assert payload["role"] == "assistant"
+    assert payload["content"].startswith("[PRIOR CONTEXT")
+    assert payload["content"] != TASK_LIST_MARKER
+    assert payload["text"].strip() == payload["content"].strip()
 
 
 def test_route_marker_free_session_returns_found_false(tmp_path, monkeypatch):
