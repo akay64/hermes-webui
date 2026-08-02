@@ -158,6 +158,17 @@ console.log(JSON.stringify({bounded, full, forced, calls}));
             },
             "missing the completed turn",
         ),
+        (
+            {
+                "session_id": "sid-1",
+                "messages": [
+                    {"role": "assistant", "content": "final answer"},
+                    {"role": "user", "content": "new question"},
+                ],
+                "tool_calls": [],
+            },
+            "missing the completed turn",
+        ),
     ],
 )
 def test_settled_window_fetch_rejects_malformed_or_stale_success(session, error):

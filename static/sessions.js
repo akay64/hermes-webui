@@ -3222,9 +3222,10 @@ function _validateSettledSessionMessageWindow(sid, session, nextSession){
   const expectedTail=[...expectedMessages].reverse().find(message=>
     message&&message.role&&message.role!=='tool'
   );
-  if(expectedTail&&!session.messages.some(message=>
-    _settledWindowMessageMatchesExpectedTail(message,expectedTail)
-  )){
+  const settledTail=[...session.messages].reverse().find(message=>
+    message&&message.role&&message.role!=='tool'
+  );
+  if(expectedTail&&!_settledWindowMessageMatchesExpectedTail(settledTail,expectedTail)){
     throw new Error('Settled session window is missing the completed turn');
   }
   return session;
