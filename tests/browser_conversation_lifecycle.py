@@ -118,6 +118,18 @@ def _get_json(url: str) -> dict:
         return json.loads(response.read(1024 * 1024))
 
 
+def _post_json(url: str, payload: dict) -> dict:
+    body = json.dumps(payload).encode("utf-8")
+    request = urllib.request.Request(
+        url,
+        data=body,
+        headers={"Content-Type": "application/json"},
+        method="POST",
+    )
+    with urllib.request.urlopen(request, timeout=10) as response:
+        return json.loads(response.read(1024 * 1024))
+
+
 def _wait_for_persisted_scene(
     base_url: str,
     session_id: str,
@@ -721,10 +733,10 @@ def main() -> int:
     )
     artifact_dir.mkdir(parents=True, exist_ok=True)
     scenario = SCENARIO
-    if scenario not in {"normal", "terminal-error"}:
+    if scenario not in {"normal", "terminal-error", "idle-settle-race"}:
         raise ValueError(
             f"Unsupported LIFECYCLE_SCENARIO {scenario!r}; "
-            "expected 'normal' or 'terminal-error'"
+            "expected 'normal', 'terminal-error', or 'idle-settle-race'"
         )
     if TEST_BITE not in {"", "drop-anchor-persistence", "drop-terminal-anchor-row"}:
         raise ValueError(
@@ -744,6 +756,13 @@ def main() -> int:
     agent_dir.mkdir(parents=True)
     workspace_dir = state_dir / "workspace"
     workspace_dir.mkdir()
+    if scenario == "idle-settle-race":
+        settings_dir = state_dir / "webui-state"
+        settings_dir.mkdir(parents=True, exist_ok=True)
+        (settings_dir / "settings.json").write_text(
+            json.dumps({"chat_activity_display_mode": "transparent_stream"}),
+            encoding="utf-8",
+        )
     (agent_dir / "run_agent.py").write_text(
         '"""Empty agent stub for the Gateway-backed browser gate."""\n',
         encoding="utf-8",
@@ -783,8 +802,27 @@ def main() -> int:
     page = None
     errors = []
     anchor_scene_requests = []
+    imported_session_id = None
+    race_session_id = None
+    race_before_idle = None
+    block_session_stream_recovery = {"enabled": False}
     try:
         proc, log, log_path, base_url = _start_webui_server(repo_root, env, artifact_dir)
+        if scenario == "idle-settle-race":
+            history = []
+            for turn in range(40):
+                history.extend([
+                    {"role": "user", "content": f"Historical question {turn}"},
+                    {"role": "assistant", "content": f"Historical answer {turn}"},
+                ])
+            imported = _post_json(base_url + "/api/session/import", {
+                "title": "Idle settlement race fixture",
+                "messages": history,
+                "model": "test/lifecycle",
+                "workspace": str(workspace_dir),
+            })
+            imported_session_id = (imported.get("session") or {}).get("session_id")
+            assert imported_session_id, imported
         playwright = sync_playwright().start()
         browser = playwright.chromium.launch(
             headless=True,
@@ -792,6 +830,34 @@ def main() -> int:
         )
         context = browser.new_context(base_url=base_url)
         page = context.new_page()
+        if scenario == "idle-settle-race":
+            page.add_init_script("""(() => {
+              const originalFetch = window.fetch.bind(window);
+              let release;
+              const gate = new Promise(resolve => { release = resolve; });
+              window.__idleSettleRace = {armed:false, entered:false, release};
+              window.fetch = async (...args) => {
+                const url = String(args[0] && args[0].url ? args[0].url : args[0] || '');
+                if (
+                  window.__idleSettleRace.armed &&
+                  (
+                    (url.includes('/api/session?') && url.includes('messages=1')) ||
+                    url.includes('/api/sessions?')
+                  )
+                ) {
+                  window.__idleSettleRace.entered = true;
+                  await gate;
+                }
+                return originalFetch(...args);
+              };
+            })()""")
+            def _route_session_stream_recovery(route):
+                if block_session_stream_recovery["enabled"]:
+                    route.abort("connectionfailed")
+                else:
+                    route.continue_()
+
+            page.route("**/api/session/stream?*", _route_session_stream_recovery)
         anchor_scene_requests = _capture_anchor_scene_requests(page)
         if TEST_BITE:
             def _route_anchor_scene(route):
@@ -831,7 +897,10 @@ def main() -> int:
 
             page.route("**/api/session/anchor-scene", _route_anchor_scene)
         errors = _capture_page_errors(page)
-        page.goto("/", wait_until="domcontentloaded")
+        page.goto(
+            f"/session/{imported_session_id}" if imported_session_id else "/",
+            wait_until="domcontentloaded",
+        )
         page.wait_for_selector("#msg", state="visible", timeout=15000)
         page.locator("#msg").fill(PROMPT)
         page.locator("#btnSend").click()
@@ -853,18 +922,25 @@ def main() -> int:
             timeout=10000,
         )
         live_snapshot = _activity_snapshot(page)
-        _assert_live_activity(live_snapshot)
-        if scenario == "terminal-error":
-            _assert_process_row_present(live_snapshot)
-            print("OK  live activity: terminal-error run keeps reasoning + completed tool")
+        if scenario == "idle-settle-race":
+            assert live_snapshot["live"], live_snapshot
+            live_roles = [row["role"] for row in live_snapshot["rows"]]
+            assert "thinking" in live_roles and "tool" in live_roles, live_snapshot
+            assert all(FINAL_TEXT not in text for text in live_snapshot["visibleFinal"]), live_snapshot
+            print("OK  live activity: Transparent Stream has reasoning + completed tool")
         else:
-            print("OK  live activity: one Anchor worklog with reasoning + completed tool")
+            _assert_live_activity(live_snapshot)
+            if scenario == "terminal-error":
+                _assert_process_row_present(live_snapshot)
+                print("OK  live activity: terminal-error run keeps reasoning + completed tool")
+            else:
+                print("OK  live activity: one Anchor worklog with reasoning + completed tool")
         _wait_for_live_anchor_projection(page)
 
         gateway.release_settle.set()
         if not gateway.final_prefix_ready.wait(timeout=10):
             raise AssertionError("mock Gateway did not emit the final-answer prefix")
-        if scenario == "normal":
+        if scenario in {"normal", "idle-settle-race"}:
             page.wait_for_function(
                 """text => {
                   const turn = document.querySelector('#liveAssistantTurn');
@@ -873,7 +949,125 @@ def main() -> int:
                 arg=FINAL_ACK_TEXT,
                 timeout=10000,
             )
+            if scenario == "idle-settle-race":
+                race_session_id = page.evaluate("S.session && S.session.session_id")
+                assert race_session_id, "active session id missing before terminal settlement"
+                race_before_idle = _activity_snapshot(page)
+                page.evaluate("window.__idleSettleRace.armed = true")
+                page.evaluate(
+                    "sid => { _sendInProgress = true; _sendInProgressSid = sid; }",
+                    race_session_id,
+                )
+                block_session_stream_recovery["enabled"] = True
             gateway.release_terminal.set()
+            if scenario == "idle-settle-race":
+                assert race_session_id and race_before_idle
+                session_id = race_session_id
+                before_idle = race_before_idle
+                owner_state = None
+                for _ in range(150):
+                    owner_state = page.evaluate("""sid => ({
+                      activeStreamId:S.activeStreamId,
+                      busy:S.busy,
+                      inflight:INFLIGHT[sid] ? INFLIGHT[sid].streamId : null,
+                      owner:LIVE_STREAMS[sid] ? {
+                        streamId:LIVE_STREAMS[sid].streamId,
+                        terminalSettlement:LIVE_STREAMS[sid].terminalSettlement || null,
+                      } : null,
+                      race:window.__idleSettleRace ? {
+                        armed:window.__idleSettleRace.armed,
+                        entered:window.__idleSettleRace.entered,
+                      } : null,
+                    })""", session_id)
+                    if (
+                        owner_state["owner"]
+                        and owner_state["owner"]["terminalSettlement"] == "settling"
+                    ):
+                        break
+                    page.wait_for_timeout(100)
+                else:
+                    raise AssertionError(f"terminal settlement owner was not retained: {owner_state!r}")
+                assert owner_state["race"]["armed"], owner_state
+                page.evaluate("() => { _sendInProgress = false; _sendInProgressSid = null; }")
+                reconcile_changed = page.evaluate("""sid =>
+                  _reconcileActiveSessionIdleStateFromList([{
+                    session_id:sid,
+                    is_streaming:false,
+                    active_stream_id:null,
+                    pending_user_message:null,
+                    has_pending_user_message:false,
+                    pending_started_at:null,
+                  }])
+                """, session_id)
+                after_idle = _activity_snapshot(page)
+                page.evaluate("window.__idleSettleRace.release()")
+                page.wait_for_function(
+                    "() => typeof S !== 'undefined' && S.busy === false && !S.activeStreamId",
+                    timeout=15000,
+                )
+                page.wait_for_timeout(2000)
+                after_release = _activity_snapshot(page)
+                durable = _get_json(
+                    f"{base_url}/api/session?session_id={session_id}&messages=1"
+                )
+                durable_messages = (durable.get("session") or {}).get("messages") or []
+                durable_final_count = sum(
+                    FINAL_TEXT in str(message.get("content") or "")
+                    for message in durable_messages
+                    if isinstance(message, dict) and message.get("role") == "assistant"
+                )
+                print("OK  race checkpoint before idle: " + json.dumps(before_idle["clientState"], sort_keys=True))
+                print("OK  race checkpoint after idle: " + json.dumps({
+                    "clientState": after_idle["clientState"],
+                    "live": after_idle["live"],
+                    "transcriptHasFinal": FINAL_TEXT in after_idle["transcript"],
+                }, sort_keys=True))
+                print("OK  race checkpoint after release: " + json.dumps({
+                    "clientState": after_release["clientState"],
+                    "live": after_release["live"],
+                    "visibleFinal": after_release["visibleFinal"],
+                    "transcriptHasFinal": FINAL_TEXT in after_release["transcript"],
+                    "durableFinalCount": durable_final_count,
+                }, sort_keys=True))
+                assert before_idle["clientState"]["busy"] is True, before_idle
+                assert before_idle["clientState"]["activeStreamId"], before_idle
+                assert reconcile_changed is False, after_idle
+                assert after_idle["clientState"]["busy"] is True, after_idle
+                assert after_idle["clientState"]["activeStreamId"] == before_idle["clientState"]["activeStreamId"], after_idle
+                assert FINAL_TEXT not in after_idle["transcript"], after_idle
+                assert durable_final_count == 1, durable_messages
+                final_missing_before_reload = FINAL_TEXT not in after_release["transcript"]
+                page.reload(wait_until="domcontentloaded")
+                page.wait_for_function(
+                    "text => ((document.querySelector('#msgInner') || {}).innerText || '').includes(text)",
+                    arg=FINAL_TEXT,
+                    timeout=15000,
+                )
+                reloaded = _activity_snapshot(page)
+                assert reloaded["transcript"].count(FINAL_TEXT) == 1, reloaded
+                print("OK  hard reload restores the durably persisted final reply")
+                assert not final_missing_before_reload, {
+                    "reason": "final reply disappeared after live-to-settled handoff",
+                    "before": before_idle["clientState"],
+                    "after_idle": {
+                        "clientState": after_idle["clientState"],
+                        "live": after_idle["live"],
+                        "transcript_has_final": FINAL_TEXT in after_idle["transcript"],
+                    },
+                    "after_settlement": {
+                        "clientState": after_release["clientState"],
+                        "live": after_release["live"],
+                        "transcript_has_final": FINAL_TEXT in after_release["transcript"],
+                    },
+                    "durable_final_count": durable_final_count,
+                    "reload_final_count": reloaded["transcript"].count(FINAL_TEXT),
+                }
+                print("\nIDLE-SETTLE RACE GATE PASSED")
+                context.close()
+                browser.close()
+                browser = None
+                exit_code = 0
+                return 0
             page.wait_for_function(
                 """text => typeof S !== 'undefined' && S.busy === false && !S.activeStreamId &&
                   ((document.querySelector('#msgInner') || {}).innerText || '').includes(text)""",

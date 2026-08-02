@@ -43,6 +43,9 @@ jobs:
           - name: terminal-error
             script: tests/browser_conversation_lifecycle.py
             scenario: terminal-error
+          - name: idle-settle-race
+            script: tests/browser_conversation_lifecycle.py
+            scenario: idle-settle-race
           - name: historical-transcript-hydration
             script: tests/browser_historical_transcript_hydration.py
     steps:

@@ -966,6 +966,14 @@ function _reconcileActiveSessionIdleStateFromList(serverRows) {
   const serverRow=serverRows.find(s=>s&&s.session_id===sid);
   if (!serverRow) return false;
   if (!_isServerIdleSessionRow(serverRow)) return false;
+  // The server can become idle while the browser still owns the bounded
+  // live-to-settled handoff. Preserve only that exact terminal owner; every
+  // ordinary stale or stuck stream still follows the cleanup below.
+  if (
+    S.activeStreamId &&
+    typeof _isExactTerminalSettlementOwner==='function' &&
+    _isExactTerminalSettlementOwner(sid,S.activeStreamId)
+  ) return false;
   let changed=false;
   if (S.busy) { S.busy=false; changed=true; }
   if (S.activeStreamId) { S.activeStreamId=null; changed=true; }

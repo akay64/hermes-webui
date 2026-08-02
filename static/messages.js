@@ -2649,6 +2649,25 @@ function closeLiveStream(sessionId, streamId, source){
   }
 }
 
+function _liveStreamOwnerMatches(sessionId, streamId, source){
+  if(!sessionId||!streamId||typeof LIVE_STREAMS==='undefined'||!LIVE_STREAMS) return false;
+  const owner=LIVE_STREAMS[sessionId];
+  if(!owner||owner.streamId!==streamId) return false;
+  return !source||owner.source===source;
+}
+
+function _claimTerminalSettlementOwner(sessionId, streamId, source){
+  if(!_liveStreamOwnerMatches(sessionId,streamId,source)) return null;
+  const owner=LIVE_STREAMS[sessionId];
+  owner.terminalSettlement='settling';
+  return owner;
+}
+
+function _isExactTerminalSettlementOwner(sessionId, streamId, source){
+  if(!_liveStreamOwnerMatches(sessionId,streamId,source)) return false;
+  return LIVE_STREAMS[sessionId].terminalSettlement==='settling';
+}
+
 function closeOtherLiveStreams(activeSid){
   // Keep the live token SSE connection scoped to the conversation pane the user
   // is actually viewing. Background sessions still show running/finished state
@@ -2827,11 +2846,19 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
     stopClarifyPolling();
     hideClarifyCard(true, reason||'terminal');
   }
+  let _ownerSource=null;
   function _clearOwnerInflightState(options){
-    if(_isActiveSession() && S.activeStreamId!==streamId) return false;
-    delete INFLIGHT[activeSid];
-    clearInflightState(activeSid);
+    const owner=LIVE_STREAMS[activeSid];
+    if(!owner||owner.streamId!==streamId||owner.source!==_ownerSource) return false;
+    if(_isActiveSession() && S.activeStreamId!==streamId && S.activeStreamId!==null) return false;
+    const inflight=INFLIGHT[activeSid];
+    if(inflight&&inflight.streamId&&inflight.streamId!==streamId) return false;
+    if(inflight){
+      delete INFLIGHT[activeSid];
+      clearInflightState(activeSid);
+    }
     _clearActivePaneInflightIfOwner();
+    owner.terminalSettlement='settled';
     if(!(options&&options.deferSessionStreamResume)){
       _resumeSessionStreamAfterLiveChat(activeSid);
     }
@@ -6081,6 +6108,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
   }
 
   function _wireSSE(source){
+    _ownerSource=source;
     const existingLive=LIVE_STREAMS[activeSid];
     if(existingLive&&existingLive.source&&existingLive.source!==source){
       try{if(existingLive.source.readyState!==2)existingLive.source.close();}catch(_){ }
@@ -6494,9 +6522,34 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       // S.messages with stale server data (issue #3195).
       _streamFinalized=true;
       _terminalStateReached=true;
+      const _terminalSettlementOwner=_claimTerminalSettlementOwner(activeSid,streamId,source);
+      if(!_terminalSettlementOwner){
+        _closeSource(source);
+        return;
+      }
+      let _doneData;
+      try{
+        _doneData=JSON.parse(e.data);
+      }catch(_donePayloadError){
+        if(_isSessionCurrentPane(activeSid)&&S.activeStreamId===streamId){
+          S.activeStreamId=null;
+          S.busy=false;
+          if(typeof updateSendBtn==='function') updateSendBtn();
+        }
+        const _resumeAfterMalformed=_clearOwnerInflightState({deferSessionStreamResume:true});
+        if(_isSessionCurrentPane(activeSid)&&typeof loadSession==='function'){
+          void loadSession(activeSid,{
+            force:true,
+            externalRefreshReason:'terminal-settlement-recovery',
+            keepStaleUntilLoaded:true,
+          });
+        }
+        _closeSource(source);
+        if(_resumeAfterMalformed) _resumeSessionStreamAfterLiveChat(activeSid);
+        return;
+      }
       if(_persistTimer){clearTimeout(_persistTimer);_persistTimer=null;}
       _cancelThrottledSnapshotTimer();
-      const _doneData=JSON.parse(e.data);
       const _doneEvent=e;
       const _finishDone=async()=>{
         // Bug A fix: cancel any pending rAF and mark stream finalized before
@@ -6558,8 +6611,8 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
           }
           : null;
         let _deferredOwnerSessionStreamResume=false;
+        let _authoritativeSettledRenderInstalled=false;
         try{
-        _deferredOwnerSessionStreamResume=_clearOwnerInflightState({deferSessionStreamResume:true});
         if(typeof _markSessionCompletedInList==='function'){
           _markSessionCompletedInList(completedSession, activeSid);
         }
@@ -6597,7 +6650,8 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
           const _settlementStillOwnsPane=
             _isSessionCurrentPane(activeSid)&&
             S.activeStreamId===streamId&&
-            !!(_settledLiveOwner&&_settledLiveOwner.streamId===streamId&&_settledLiveOwner.source===source);
+            _settledLiveOwner===_terminalSettlementOwner&&
+            _isExactTerminalSettlementOwner(activeSid,streamId,source);
           if(!_settlementStillOwnsPane) isActiveSession=false;
         }
         // The bounded window fetch above can take long enough for the reader
@@ -6798,6 +6852,8 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
           else renderMessages({preserveScroll:true});
           if(typeof _followSettledDoneIfStillPinned==='function') _followSettledDoneIfStillPinned();
           else if(shouldFollowOnDone&&typeof scrollToBottom==='function') scrollToBottom();
+          _authoritativeSettledRenderInstalled=true;
+          _deferredOwnerSessionStreamResume=_clearOwnerInflightState({deferSessionStreamResume:true});
           if(typeof noteWorkspaceMutationsFromToolCalls==='function') noteWorkspaceMutationsFromToolCalls(S.toolCalls);
           loadDir('.', { preservePreview: true });
           // TTS auto-read: speak the last assistant response if enabled (#499)
@@ -6833,9 +6889,40 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
           liveDisplayText:typeof _streamDisplay==='function'?_streamDisplay():assistantText,
         });
         sendBrowserNotification('Response complete',_completionPreview||'Task finished',{forceHidden:_wasEverBackgrounded,sid:activeSid});
+        if(!_deferredOwnerSessionStreamResume&&_isExactTerminalSettlementOwner(activeSid,streamId,source)){
+          _deferredOwnerSessionStreamResume=_clearOwnerInflightState({deferSessionStreamResume:true});
+        }
+        }catch(_settlementError){
+          const _stillOwnsSettlement=_isExactTerminalSettlementOwner(activeSid,streamId,source);
+          if(typeof console!=='undefined'&&console.error){
+            console.error('terminal settlement failed',{
+              sessionId:activeSid,
+              streamId,
+              phase:_authoritativeSettledRenderInstalled?'post-render':'pre-render',
+              error:_settlementError,
+            });
+          }
+          if(_stillOwnsSettlement){
+            if(_isSessionCurrentPane(activeSid)&&S.activeStreamId===streamId){
+              S.activeStreamId=null;
+              S.busy=false;
+              if(typeof updateSendBtn==='function') updateSendBtn();
+            }
+            _deferredOwnerSessionStreamResume=_clearOwnerInflightState({deferSessionStreamResume:true});
+            if(!_authoritativeSettledRenderInstalled&&_isSessionCurrentPane(activeSid)&&typeof loadSession==='function'){
+              void loadSession(activeSid,{
+                force:true,
+                externalRefreshReason:'terminal-settlement-recovery',
+                keepStaleUntilLoaded:true,
+              });
+            }
+          }
         }finally{
           if(_deferredOwnerSessionStreamResume){
             _resumeSessionStreamAfterLiveChat(completedSid);
+          }
+          if(_liveStreamOwnerMatches(activeSid,streamId,source)){
+            _closeSource(source);
           }
         }
       };
@@ -6844,11 +6931,15 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
         _drainStreamFadeBeforeDone(_finishDone);
         return;
       }
-      _finishDone();
+      void _finishDone();
     });
 
     source.addEventListener('stream_end',async e=>{
       if(_streamFinalized){
+        if(_isExactTerminalSettlementOwner(activeSid,streamId,source)){
+          try{if(source&&source.readyState!==2)source.close();}catch(_){ }
+          return;
+        }
         _closeSource(source);
         return;
       }
@@ -7134,6 +7225,10 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
         return;
       }
       if(_terminalStateReached || _streamFinalized){
+        if(_isExactTerminalSettlementOwner(activeSid,streamId,source)){
+          try{if(source&&source.readyState!==2)source.close();}catch(_){ }
+          return;
+        }
         _closeSource(source);
         return;
       }
