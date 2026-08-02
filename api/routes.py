@@ -25038,6 +25038,12 @@ def _is_preserved_task_list_marker(message):
 
 def _is_merged_compression_envelope(message):
     """Return true for an unflagged merge-into-tail compression envelope."""
+    if (
+        not isinstance(message, dict)
+        or not message.get("role")
+        or message.get("role") == "tool"
+    ):
+        return False
     text = _compression_marker_text(message)
     if not text.startswith(_MERGED_PRIOR_CONTEXT_HEADER):
         return False

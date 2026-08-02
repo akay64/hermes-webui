@@ -242,6 +242,31 @@ def test_find_marker_uses_display_substantive_before_context_task_fallback(tmp_p
     assert _find_last_compression_marker(session) is substantive
 
 
+def test_unflagged_merged_envelope_requires_non_tool_role(tmp_path):
+    from api.routes import _find_last_compression_marker
+
+    for invalid_role in ("tool", None):
+        invalid_envelope = {"content": MERGED_COMPRESSION_ENVELOPE}
+        if invalid_role is not None:
+            invalid_envelope["role"] = invalid_role
+
+        valid_summary = {"role": "assistant", "content": COMPACTION_MARKER}
+        session = Session(
+            session_id=f"ctx_invalid_envelope_{invalid_role or 'missing'}",
+            workspace=str(tmp_path),
+            context_messages=[valid_summary, invalid_envelope],
+        )
+        assert _find_last_compression_marker(session) is valid_summary
+
+        task_card = {"role": "user", "content": TASK_LIST_MARKER}
+        fallback_session = Session(
+            session_id=f"ctx_invalid_fallback_{invalid_role or 'missing'}",
+            workspace=str(tmp_path),
+            context_messages=[task_card, invalid_envelope],
+        )
+        assert _find_last_compression_marker(fallback_session) is task_card
+
+
 def test_unflagged_merged_envelope_requires_all_ordered_delimiters(tmp_path):
     from api.routes import _find_last_compression_marker
 
