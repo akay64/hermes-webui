@@ -833,6 +833,30 @@ EXPECT:
   - Send button still works after switching back
 FAIL: Messages lost, session list blank, Send button broken.
 
+### T13.3: Sidebar Order, Todos Title, and Unfinished Badge
+SETUP:
+  - Use a session with at least four todos: one pending, one in progress, one completed, and one cancelled.
+  - Keep a second session with no active todos available for switching.
+STEPS:
+  1. Capture the current desktop rail and narrow/mobile sidebar for before/after comparison.
+  2. At desktop width, inspect the rail order.
+  3. At narrow/mobile width, open the sidebar and inspect the navigation order.
+  4. Select the Todos panel in the session with todos.
+  5. While Todos is selected, switch to another session or rename the current session.
+  6. Select another panel while leaving the session with todos active.
+  7. Complete or cancel every remaining unfinished todo.
+  8. Switch to the empty session, then reload the page.
+EXPECT:
+  - Both navigation surfaces begin with: Chat, Todos, Spaces, Skills, Memory, Profiles, Tasks, Insights.
+  - Kanban and Logs remain available after the requested sequence; Dashboard and Settings remain available in their existing special positions.
+  - The visible WebUI titlebar is exactly "{session name} - Todos" for an active session and "Todos" without one.
+  - The browser tab title keeps the assistant suffix: "{session name} - Todos — {assistant}".
+  - The desktop and mobile Todos badges show the same unfinished count; completed and cancelled items are excluded.
+  - The badge still updates while another panel is selected.
+  - Both badges disappear when all todos are completed/cancelled, after switching to the empty session, and after reload.
+  - Navigation icons remain usable without clipping or reducing the narrow/mobile touch target.
+FAIL: The two navigation surfaces disagree, a retained panel disappears, the title is generic/stale, badge counts terminal items, an inactive-panel update is missed, or a zero-count badge remains visible.
+
 ---
 
 ## Section 14: Tasks Panel (Cron Viewer) (Sprint 3)

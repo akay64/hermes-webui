@@ -6510,6 +6510,9 @@ main.main > .main-view:not([id="mainChat"]):not([id="mainSettings"]) .main-view-
 .detail-alert p{margin:0 0 8px;font-size:13px;line-height:1.45;color:var(--text);}
 .auth-warning-badge{display:none;position:absolute;top:4px;right:4px;width:8px;height:8px;border-radius:50%;background:#e05;pointer-events:none;}
 .nav-tab{position:relative;}
+.todos-count-badge{display:none;align-items:center;justify-content:center;min-width:14px;height:14px;padding:0 3px;border-radius:999px;background:var(--accent);color:var(--accent-text);font-size:9px;font-weight:700;line-height:1;pointer-events:none;position:absolute;z-index:1;box-sizing:border-box;}
+.rail-btn .todos-count-badge{top:2px;right:2px;}
+.sidebar-nav .todos-count-badge{top:2px;right:4px;}
 .detail-alert p:last-child{margin-bottom:0;}
 .detail-alert-actions{display:flex;gap:8px;flex-wrap:wrap;margin-top:10px;}
 

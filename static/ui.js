@@ -9650,6 +9650,30 @@ function todoStatusKey(status){
   return Object.prototype.hasOwnProperty.call(TODO_STATUS_RENDERING,key)?key:'pending';
 }
 
+function _countUnfinishedTodos(todos){
+  const items=Array.isArray(todos)?todos:[];
+  return items.filter(todo=>{
+    const status=todoStatusKey(todo&&todo.status);
+    return status!=='completed'&&status!=='cancelled';
+  }).length;
+}
+
+function _updateTodosBadges(){
+  if(typeof document==='undefined'||typeof _getCurrentTodosSnapshot!=='function') return;
+  const count=_countUnfinishedTodos(_getCurrentTodosSnapshot());
+  const badges=document.querySelectorAll('[data-panel="todos"] .todos-count-badge');
+  badges.forEach(badge=>{
+    badge.textContent=count?String(count):'';
+    badge.style.display=count?'inline-flex':'none';
+  });
+  const buttons=document.querySelectorAll('[data-panel="todos"]');
+  buttons.forEach(button=>{
+    const current=button.getAttribute('aria-label')||button.getAttribute('data-label')||t('tab_todos');
+    const label=current.replace(/\s+\(\d+\)$/,'');
+    button.setAttribute('aria-label',count?`${label} (${count})`:label);
+  });
+}
+
 function todoStatusVisual(status){
   const key=todoStatusKey(status);
   return TODO_STATUS_RENDERING[key];
@@ -9712,6 +9736,7 @@ function scheduleTodosRefresh(){
   // without timer drift.
   if(_todosRenderRafId) return;
   if(typeof requestAnimationFrame!=='function'){
+    if(typeof _updateTodosBadges==='function') _updateTodosBadges();
     if(typeof loadTodos==='function') loadTodos();
     if(typeof _refreshWorkspacePanelTodos==='function') _refreshWorkspacePanelTodos();
     return;
@@ -9719,6 +9744,7 @@ function scheduleTodosRefresh(){
   _todosRenderRafId=requestAnimationFrame(()=>{
     _todosRenderRafId=0;
     const sidebarActive=_todosPanelIsActive();
+    if(typeof _updateTodosBadges==='function') _updateTodosBadges();
     if(sidebarActive&&typeof loadTodos==='function') loadTodos();
     if(typeof _refreshWorkspacePanelTodos==='function') _refreshWorkspacePanelTodos();
   });

@@ -27,10 +27,14 @@ def test_load_todos_renders_single_source_of_truth_before_legacy_scan():
     assert end != -1
     load_todos = src[start:end]
 
-    assert "if (S.todoStateMeta)" in load_todos
-    assert "todos = Array.isArray(S.todos) ? S.todos : [];" in load_todos
-    assert "todos = _legacyTodosFromMessages();" in load_todos
-    assert load_todos.find("todos = Array.isArray(S.todos) ? S.todos : [];") < load_todos.find("todos = _legacyTodosFromMessages();")
+    assert "const todos = _getCurrentTodosSnapshot();" in load_todos
+
+    helper_start = src.find("function _getCurrentTodosSnapshot()")
+    assert helper_start != -1
+    helper = src[helper_start:end]
+    assert "if (S.todoStateMeta)" in helper
+    assert "return Array.isArray(S.todos) ? S.todos : [];" in helper
+    assert "return _legacyTodosFromMessages();" in helper
 
 
 def test_legacy_todos_fallback_still_uses_raw_session_messages():

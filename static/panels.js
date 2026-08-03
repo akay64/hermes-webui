@@ -66,6 +66,14 @@ function syncAppTitlebar() {
     sourceLabel = S.session.source_label || S.session.source_tag || S.session.raw_source || '';
     // Recovered sidecars stamp source_label 'WebUI' (api/session_recovery.py); don't badge a native session as its own source (#3338).
     if (/^webui$/i.test(sourceLabel)) sourceLabel = '';
+  } else if (panel === 'todos') {
+    const key = APP_TITLEBAR_KEYS[panel];
+    const label = key && typeof t === 'function' ? t(key) : 'Todos';
+    const session = typeof S !== 'undefined' && S ? S.session : null;
+    const sessionTitle = session
+      ? (session.title || (typeof t === 'function' ? t('untitled') : 'Untitled'))
+      : '';
+    mainText = sessionTitle ? `${sessionTitle} - ${label}` : label;
   } else {
     const key = APP_TITLEBAR_KEYS[panel];
     mainText = key && typeof t === 'function' ? t(key) : (panel.charAt(0).toUpperCase() + panel.slice(1));
@@ -3787,16 +3795,16 @@ async function loadKanbanTask(taskId){
 // in ui.js): repeated emissions that yield identical DOM are no-ops.
 // Coalescing of bursty live updates happens upstream in
 // scheduleTodosRefresh().
+function _getCurrentTodosSnapshot() {
+  if (S.todoStateMeta) return Array.isArray(S.todos) ? S.todos : [];
+  return _legacyTodosFromMessages();
+}
+
 function loadTodos() {
   const panel = $('todoPanel');
   if (!panel) return;
 
-  let todos;
-  if (S.todoStateMeta) {
-    todos = Array.isArray(S.todos) ? S.todos : [];
-  } else {
-    todos = _legacyTodosFromMessages();
-  }
+  const todos = _getCurrentTodosSnapshot();
 
   if (!todos.length) {
     if (typeof _todosLastRenderedHash !== 'undefined' && _todosLastRenderedHash === '__empty__') return;
