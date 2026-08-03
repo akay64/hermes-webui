@@ -2424,6 +2424,10 @@ async function send(){
       if(!_clarifySessionId || _clarifySessionId===activeSid) hideClarifyCard(true, 'terminal');
       removeThinking();
       S.session=null;S.messages=[];
+      if(typeof _hydrateTodosFromSession==='function') _hydrateTodosFromSession(null);
+      if(typeof _currentPanel==='string'&&_currentPanel==='chat'){
+        if(typeof syncTopbar==='function') syncTopbar();
+      }else if(typeof syncAppTitlebar==='function') syncAppTitlebar();
       setBusy(false);setComposerStatus('');
       if(typeof clearOptimisticSessionStreaming==='function') clearOptimisticSessionStreaming(activeSid);
       if(typeof renderMessages==='function') renderMessages();

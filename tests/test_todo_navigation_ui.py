@@ -49,6 +49,15 @@ def test_default_navigation_order_keeps_requested_sequence_and_existing_panels()
         assert panels.index("logs") > panels.index("insights"), container
         assert "settings" in panels, container
     assert source.count('class="todos-count-badge"') == 2
+    assert "0 0 0 .34-5.58 2.5 2.5" in source
+    assert "0 0 0-.34-5.58 3 3" not in source
+
+
+def test_todo_badge_uses_contrasting_theme_background_foreground():
+    css = _src("style.css")
+    assert "background:var(--accent);color:var(--bg)" in css
+    assert "--bg:#FEFCF7" in css
+    assert "--bg:#0D0D1A" in css
 
 
 def _node_result(script: str, *args: str) -> str:
@@ -292,3 +301,16 @@ def test_load_todos_and_badge_share_the_current_snapshot_resolver():
     reset_start = ui.find("function _resetTodosRenderCache()", schedule_start)
     schedule_block = ui[schedule_start:reset_start]
     assert "_updateTodosBadges()" in schedule_block
+
+
+def test_deleted_session_recovery_clears_todos_and_resynchronizes_title():
+    source = _src("messages.js")
+    start = source.find("if(e&&e.status===404){")
+    end = source.find("const conflictActiveStream", start)
+    assert start != -1 and end > start
+    recovery = source[start:end]
+
+    assert "S.session=null;S.messages=[];" in recovery
+    assert "_hydrateTodosFromSession(null)" in recovery
+    assert "syncTopbar()" in recovery
+    assert "syncAppTitlebar()" in recovery
