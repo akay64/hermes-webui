@@ -218,7 +218,7 @@ If an AI assistant is helping with install, reinstall, bootstrap, provider setup
 
 ### Sessions
 - Create, rename, duplicate, delete, search by title and message content
-- Session actions via `⋯` dropdown per session — pin, move to project, archive, duplicate, delete
+- Session actions via `⋯` dropdown per session — copy the session ID or conversation link, pin, move to project, archive, duplicate, delete
 - Pin/star sessions to the top of the sidebar (gold indicator)
 - Archive sessions (hide without deleting, toggle to show)
 - Session projects -- named groups with colors for organizing sessions

@@ -11,6 +11,7 @@ const ICONS={
   more:'<svg width="14" height="14" viewBox="0 0 16 16" fill="currentColor" stroke="none"><circle cx="8" cy="3" r="1.25"/><circle cx="8" cy="8" r="1.25"/><circle cx="8" cy="13" r="1.25"/></svg>',
   edit:'<svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round"><path d="M11.5 2.5l2 2L5 13H3v-2z"/><path d="M10 4l2 2"/></svg>',
   spark:'<svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round"><path d="M8 1.8l1.1 3.1 3.1 1.1-3.1 1.1L8 10.2 6.9 7.1 3.8 6l3.1-1.1z"/><path d="M12.5 9.5l.5 1.5 1.5.5-1.5.5-.5 1.5-.5-1.5-1.5-.5 1.5-.5z"/></svg>',
+  copy:'<svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round"><rect x="5" y="5" width="8" height="8" rx="1.2"/><path d="M3 10.5V3.8C3 3.36 3.36 3 3.8 3H10"/></svg>',
   link:'<svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round"><path d="M6.7 9.3a3 3 0 0 1 0-4.2l1.7-1.7a3 3 0 0 1 4.2 4.2l-1 1"/><path d="M9.3 6.7a3 3 0 0 1 0 4.2l-1.7 1.7a3 3 0 0 1-4.2-4.2l1-1"/></svg>',
   download:'<svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round"><path d="M14 10.5v2.5a1 1 0 0 1-1 1H3a1 1 0 0 1-1-1v-2.5"/><polyline points="4.5 7 8 10.5 11.5 7"/><line x1="8" y1="10.5" x2="8" y2="2"/></svg>',
 };
@@ -4761,6 +4762,17 @@ async function _copySessionLink(session){
   }
 }
 
+async function _copySessionId(session){
+  const sid=session&&session.session_id;
+  if(!sid) return;
+  try{
+    await _copyTextToClipboard(String(sid));
+    showToast(t('session_id_copied'));
+  }catch(err){
+    showToast(t('session_id_copy_failed')+(err&&err.message?err.message:err));
+  }
+}
+
 function _mountSessionActionMenu(menu, session, anchorEl){
   _sessionActionPreviousFocus=document.activeElement;
   document.body.appendChild(menu);
@@ -4877,6 +4889,18 @@ function _buildSessionRenameStarter(session, displayEl, renderDisplay){
     displayEl.replaceWith(inp);
     setTimeout(()=>{inp.focus();inp.select();},10);
   };
+}
+
+function _appendSessionCopyIdAction(menu, session){
+  menu.appendChild(_buildSessionAction(
+    t('session_copy_id'),
+    t('session_copy_id_desc'),
+    ICONS.copy,
+    async()=>{
+      closeSessionActionMenu();
+      await _copySessionId(session);
+    }
+  ));
 }
 
 function _appendSessionCopyLinkAction(menu, session){
@@ -5107,6 +5131,7 @@ function _openSessionActionMenu(session, anchorEl){
   menu.id='sessionActionMenu-'+(++_sessionActionMenuId);
   menu.setAttribute('role','menu');
   menu.setAttribute('aria-label', 'Conversation actions');
+  _appendSessionCopyIdAction(menu, session);
   _appendSessionCopyLinkAction(menu, session);
   if(isReadOnly){
     _appendSessionExportHtmlAction(menu, session);

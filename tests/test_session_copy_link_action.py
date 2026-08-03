@@ -66,6 +66,28 @@ def test_session_action_menu_has_copy_link_action():
     assert "t('session_copy_link_desc')" in SESSIONS_JS
 
 
+def test_session_action_menu_has_copy_id_action_before_copy_link():
+    assert "ICONS.copy" in SESSIONS_JS
+    assert "_appendSessionCopyIdAction(menu, session);" in SESSIONS_JS
+    assert "t('session_copy_id')" in SESSIONS_JS
+    assert "t('session_copy_id_desc')" in SESSIONS_JS
+    assert "await _copyTextToClipboard(String(sid));" in SESSIONS_JS
+    assert SESSIONS_JS.index("_appendSessionCopyIdAction(menu, session);") < SESSIONS_JS.index(
+        "_appendSessionCopyLinkAction(menu, session);"
+    )
+
+
+def test_copy_id_i18n_keys_have_english_fallbacks():
+    for key in [
+        "session_copy_id",
+        "session_copy_id_desc",
+        "session_id_copied",
+        "session_id_copy_failed",
+    ]:
+        assert f"{key}:" in I18N_JS
+    assert "Copy session ID" in I18N_JS
+
+
 def test_session_link_copies_internal_markdown_reference_not_external_url():
     assert "function _sessionInternalReferenceForSession" in SESSIONS_JS
     assert "session://${_sessionMarkdownUrlSid(sid)}" in SESSIONS_JS
